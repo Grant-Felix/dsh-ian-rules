@@ -1077,3 +1077,74 @@ test('按场景注入：开着 sceneLog 时会往命中日志里记一行', asyn
 	await new Promise((resolve) => setTimeout(resolve, 50))
 	assert.equal(existsSync(path.join(quietHome, 'ian-rules.hits.jsonl')), false, '没开就不该写日志')
 })
+
+test('按场景注入：工作目录不进匹配信号（目录名不许把规则「喊」出来）', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [{ id: 'g1', title: '项目/阶段/现实', content: '起手先写下当前阶段与不能动的东西', mode: 'auto', tags: ['规划'] }],
+				projects: [],
+			},
+		}),
+	)
+	// 目录名里带「项目」——曾经因为把 cwd 拼进信号，这条规则每轮都命中
+	const agent = { session: { id: 'session-cwd', header: { cwd: '/home/u/项目/demo' } } }
+	const message = (text) => ({ id: 'm', role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
+
+	assert.equal(
+		(await runPreStep(ctx, { agent, messages: [message('今天天气不错')], turn: 1, step: 1 })).messages.length,
+		1,
+		'无关消息不该因为目录名里有「项目」而命中',
+	)
+	// 反向确认不是「整条都不命中」的假绿灯：真聊到规划仍要命中
+	const hit = await runPreStep(ctx, { agent, messages: [message('先规划一下这个方案')], turn: 2, step: 1 })
+	assert.equal(hit.messages.length, 2)
+	assert.match(hit.messages[1].content[0].text, /项目\/阶段\/现实/)
+})
+
+test('接口：/scene 的 path 只决定候选范围，不进匹配信号；分数与阈值自洽', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [
+					{ id: 'a1', title: '项目/阶段/现实', content: '起手先写下当前阶段', mode: 'auto', tags: ['规划'] },
+					{ id: 'a2', title: '假设驱动', content: '最小可测假设→最便宜实验', mode: 'auto', tags: ['复现'] },
+				],
+				projects: [],
+			},
+		}),
+	)
+	const probe = (path) => callRoute(ctx, 'POST', '/ian-rules/scene', JSON.stringify({ path, text: '今天天气不错' }))
+	const withCjkPath = await probe('/home/u/项目/demo')
+	const neutralPath = await probe('/tmp/x')
+	// 同一句话，路径不同 → 结果必须相同（路径不参与打分）
+	assert.deepEqual(
+		withCjkPath.payload.matched.map((entry) => entry.id),
+		neutralPath.payload.matched.map((entry) => entry.id),
+	)
+	// 面板要能解释结果：命中项的分数必须真的过了阈值
+	assert.ok(withCjkPath.payload.matched.every((entry) => entry.score >= withCjkPath.payload.threshold))
+	const related = await callRoute(ctx, 'POST', '/ian-rules/scene', JSON.stringify({ path: '/tmp/x', text: '这段代码复现不了' }))
+	assert.deepEqual(related.payload.matched.map((entry) => entry.id), ['a2'])
+	assert.ok(related.payload.matched[0].score >= related.payload.threshold)
+})
