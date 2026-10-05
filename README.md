@@ -1,10 +1,10 @@
-# dsh-agent-rules · Felix 项目开发规则
+# dsh-ian-rules · Felix 项目开发规则
 
 DSH（DeepSeek Harness）个人插件：把你自己的一套**项目开发规则**交给 DSH，让 agent 在开发项目时自动遵守。
 
 - **面板**：Web GUI **右侧栏**新增「开发规则」页（与「Docker 容器」并列，走 DSH 原生 `sidebarRightTabs` + `sidebar.right.pane.tab` 契约），可视化维护规则（全局 + 按项目）。
 - **自动注入**：每个会话组装系统提示时，按该会话的工作目录解析生效规则并注入，无需手工提醒。
-- **对话内维护**：另带 `agent_rules` 模型工具，直接说「把这条记进开发规则」也能落库。
+- **对话内维护**：另带 `ian_rules` 模型工具，直接说「把这条记进开发规则」也能落库。
 - **即时生效**：保存后正在运行的会话下一步就生效，不用重启 DSH。
 
 ## 一、功能
@@ -22,12 +22,12 @@ DSH（DeepSeek Harness）个人插件：把你自己的一套**项目开发规�
 | 删除保护 | 删除规则 / 项目条目需要**二次确认**（3 秒内不确认自动还原） |
 | 保存冲突检测 | `/save` 带 `revision`；磁盘被别的会话或手工编辑改过时返回 **409**，面板提示「载入磁盘版本」或「用我的改动覆盖」，不会静默覆盖。revision 只在**内容真的变了**时前进 —— 插件自己写盘触发的目录事件不会把 revision 顶高一格（否则「保存成功后再保存一次」会假报冲突，真冲突的提示也就没人信了） |
 | 外部改动同步 | 面板在后台按 revision 轮询：没有未保存改动就静默跟上，有改动就明确提示 |
-| 备份 | 每次保存前把上一版写到 `agent-rules.json.bak` |
+| 备份 | 每次保存前把上一版写到 `ian-rules.json.bak` |
 | 导入 / 导出 | 导出 JSON / Markdown；导入 Markdown / JSON（可**替换**或**合并**，按 id 与标题+正文去重） |
 | 成本提示 | 注入预览显示字符数与估算 token，并列出最占预算的 5 条规则；每条规则卡片还标出它给每轮对话增加的字符数 |
 | 注入预览 | 输入任意目录，看该目录下**真正注入**的文本（含未保存修改、命中项目、是否被截断） |
 | 上限保护 | 单次注入文本上限 12000 字符，超出在行边界截断并附提示，避免吃光提示预算 |
-| `agent_rules` 工具 | action = `list` / `add` / `update` / `remove`，支持 global / project 归属与分组 |
+| `ian_rules` 工具 | action = `list` / `add` / `update` / `remove`，支持 global / project 归属与分组 |
 | 插件更新 | 面板顶部**有更新时才出现**一条细提示，点「更新」即可更新本插件（走插件市场公布的同源更新 API，含进度、失败原因与回滚）；没装插件市场时整块隐藏 |
 | 接口硬化 | 所有接口校验 `Origin` / `Sec-Fetch-Site`（跨站 403），POST 要求 `Content-Type: application/json`（否则 415） |
 
@@ -39,7 +39,7 @@ DSH（DeepSeek Harness）个人插件：把你自己的一套**项目开发规�
 
 ```sh
 # 能直连 GitHub
-dsh plugin --profile web add github:Grant-Felix/dsh-agent-rules
+dsh plugin --profile web add github:Grant-Felix/dsh-ian-rules
 
 # 国内走 Gitee 镜像（pnpm 没有 gitee: 简写，用完整地址）
 dsh plugin --profile web add git+https://gitee.com/Grant-Felix/dev-rules.git
@@ -50,7 +50,7 @@ dsh plugin --profile web add link:$PWD
 
 `dsh plugin` 就是 pnpm 的透传：装完它会按**包名**把插件自动登记进 `dsh.profile.bundles`，不必手工改 profile 的 `package.json`。装完重启该 profile（侧边栏底部 ↻），右侧栏页面列表里就会出现「开发规则」。
 
-> **为什么还没有 npm 包可以 `add`**：`dsh-agent-rules` 这个包名在 npm 上**没有被占用**（2026-10-01 实测 `registry.npmjs.org/dsh-agent-rules` → 404），但它还没发上去 —— 首发要走一次性凭据，且 trusted publisher 只能配在「已存在的包」上（前置条件记在 `.github/workflows/publish.yml` 顶部）。所以对外仍以 **git 来源**分发：GitHub 给直连用户，Gitee 给国内用户。
+> **为什么还没有 npm 包可以 `add`**：`dsh-ian-rules` 这个包名在 npm 上**没有被占用**（2026-10-01 实测 `registry.npmjs.org/dsh-ian-rules` → 404），但它还没发上去 —— 首发要走一次性凭据，且 trusted publisher 只能配在「已存在的包」上（前置条件记在 `.github/workflows/publish.yml` 顶部）。所以对外仍以 **git 来源**分发：GitHub 给直连用户，Gitee 给国内用户。
 
 改动生效范围（**本部署实测**）：
 
@@ -61,15 +61,17 @@ dsh plugin --profile web add link:$PWD
 
 > 为什么客户端改动也要重启：DSH 的 `client-modules` 在**启动时**把每个插件的 client bundle 读进内存（`readFileSync` + 内容哈希当 `rev`），之后只按「已登记的 URL」出字节；文件内容变化要经 HMR watcher 的 `rebuilt(id)` 才会重新登记，而 watcher 只有在源码检出里跑着 `pnpm run dev:web` 时才装得上。本机是安装版部署、没有跑 dev watcher，所以**硬刷新页面拿不到新 bundle**，必须重启一次 profile。
 >
-> **待复核（2026-10-01）**：这条结论与一次沙箱实测不符 —— 在沙箱（`link:` 安装、独立 `DSH_HOME`）里，改完 `lib/client.js` 只做一次页面加载（不重启实例）就能拿到新 bundle：往 CSS 里加一行注释，刷新页面后 `style[data-plugin="agent-rules"]` 里就有了它。差别可能来自安装形态（link vs 安装版）或页面加载与硬刷新的区别，**尚未在本机日常 profile 上复现**，所以上表暂时按老结论执行（拿不准就重启，代价只是几秒）。
+> **待复核（2026-10-01）**：这条结论与一次沙箱实测不符 —— 在沙箱（`link:` 安装、独立 `DSH_HOME`）里，改完 `lib/client.js` 只做一次页面加载（不重启实例）就能拿到新 bundle：往 CSS 里加一行注释，刷新页面后 `style[data-plugin="ian-rules"]` 里就有了它。差别可能来自安装形态（link vs 安装版）或页面加载与硬刷新的区别，**尚未在本机日常 profile 上复现**，所以上表暂时按老结论执行（拿不准就重启，代价只是几秒）。
 
-升级：**面板顶部在有新版本时会自动出现一条提示**，点「更新」即可（走插件市场公布的同源更新 API；没装插件市场时这条提示不出现）。也可在插件市场的「更新」里做（它按 profile 的 lockfile 锁定的提交与远端 HEAD 比对，并自带 git 更新的回滚），或命令行 `dsh plugin --profile web update dsh-agent-rules`（重新解析到分支最新提交）。卸载：`dsh plugin --profile web remove dsh-agent-rules`，重启。规则文件会留在 `$DSH_HOME/agent-rules.json`。
+升级：**面板顶部在有新版本时会自动出现一条提示**，点「更新」即可（走插件市场公布的同源更新 API；没装插件市场时这条提示不出现）。也可在插件市场的「更新」里做（它按 profile 的 lockfile 锁定的提交与远端 HEAD 比对，并自带 git 更新的回滚），或命令行 `dsh plugin --profile web update dsh-ian-rules`（重新解析到分支最新提交）。卸载：`dsh plugin --profile web remove dsh-ian-rules`，重启。规则文件会留在 `$DSH_HOME/ian-rules.json`。
 
 ## 三、数据
 
-规则存在 `$DSH_HOME/agent-rules.json`（默认 `~/.dsh/agent-rules.json`），原子写入（临时文件 + rename）；保存前上一版留在 `agent-rules.json.bak`。
+规则存在 `$DSH_HOME/ian-rules.json`（默认 `~/.dsh/ian-rules.json`），原子写入（临时文件 + rename）；保存前上一版留在 `ian-rules.json.bak`。
 
-> **更名迁移（dsh-dev-rules → dsh-agent-rules）**：启动时若发现新名字的文件不存在、而旧的 `dev-rules.json` 还在，会把旧文件**复制**一份到新名字下（原文件保留，回退到旧版本插件仍可读），面板的「更多 → 文件位置」会提示这一次迁移。确认新文件正常后，旧的 `dev-rules.json` 可以自行删除。
+> **更名迁移（dsh-dev-rules → dsh-agent-rules → dsh-ian-rules）**：启动时若发现新名字的文件不存在、而旧名字的还在，会按**由新到旧**的顺序取第一个存在的（`agent-rules.json` 优先于 `dev-rules.json`）**复制**一份到 `ian-rules.json`（原文件保留，回退到旧版本插件仍可读），面板的「更多 → 文件位置」会提示这一次迁移。确认新文件正常后，旧的那份可以自行删除。
+>
+> **包名也跟着改了**，所以升级时依赖键也要换：`dsh plugin --profile web remove dsh-agent-rules` 再 `dsh plugin --profile web add github:Grant-Felix/dsh-ian-rules`（否则 profile 里会同时留着两代，bundle 阵容里还挂着旧包名）。旧包名的数据文件按上面那条规则自动搬过来，规则不会丢。
 
 > **这份文件属于使用者本人**，不在本仓、不受本仓许可约束（见 `NOTICE.md`）。插件只读写本机这一份文件，不联网、不上传。
 
@@ -130,7 +132,7 @@ dsh plugin --profile web add link:$PWD
 
 ## 五、注入形态
 
-系统提示 section 名 `plugin:agent-rules`（order `100`，紧跟 persona 之后、工具说明之前），正文是**常量** `{{agent_rules_body}}`；真正的规则文本由同名**提示变量**提供。
+系统提示 section 名 `plugin:ian-rules`（order `100`，紧跟 persona 之后、工具说明之前），正文是**常量** `{{ian_rules_body}}`；真正的规则文本由同名**提示变量**提供。
 
 > 为什么要绕一道变量：DSH 会对 section 正文做严格的 `{{变量}}` 插值，遇到未知 / 畸形引用会直接抛错，而这一步发生在插件回调之外——用户规则里的 `{{placeholder}}` 会把整个模型步打挂。变量值不会被二次扫描，所以用户写什么都不会破坏提示组装。
 
@@ -160,15 +162,15 @@ dsh plugin --profile web add link:$PWD
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
-| GET | `/agent-rules/state` | 读当前文档 + 元信息（文件、备份、revision、规模、错误） |
-| GET | `/agent-rules/workspaces` | 项目路径下拉的数据源（工作区注册表 + 活动会话目录） |
-| POST | `/agent-rules/save` | `{ doc, revision }` 保存；revision 过期 → **409** + 当前文档 |
-| POST | `/agent-rules/reload` | 从磁盘重新读取 |
-| POST | `/agent-rules/preview` | `{ doc?, path }` 渲染注入文本 + 字符 / token / 逐条体积 |
-| POST | `/agent-rules/export` | `{ doc }` → Markdown 与 JSON 文本 |
-| POST | `/agent-rules/import` | `{ text }` → 解析 Markdown 或 JSON 得到文档 |
+| GET | `/ian-rules/state` | 读当前文档 + 元信息（文件、备份、revision、规模、错误） |
+| GET | `/ian-rules/workspaces` | 项目路径下拉的数据源（工作区注册表 + 活动会话目录） |
+| POST | `/ian-rules/save` | `{ doc, revision }` 保存；revision 过期 → **409** + 当前文档 |
+| POST | `/ian-rules/reload` | 从磁盘重新读取 |
+| POST | `/ian-rules/preview` | `{ doc?, path }` 渲染注入文本 + 字符 / token / 逐条体积 |
+| POST | `/ian-rules/export` | `{ doc }` → Markdown 与 JSON 文本 |
+| POST | `/ian-rules/import` | `{ text }` → 解析 Markdown 或 JSON 得到文档 |
 
-排障示例：`curl -s 127.0.0.1:3080/agent-rules/state | head -c 400`
+排障示例：`curl -s 127.0.0.1:3080/ian-rules/state | head -c 400`
 
 安全边界：以上接口只接受**同源**请求（跨站 `Origin` / `Sec-Fetch-Site` 直接 403），POST 必须 `Content-Type: application/json`。但同机的其它本地进程仍可无凭据访问（DSH 的 webServer 不对插件路由做登录鉴权）——规则内容会进模型提示，别把不能外发的东西写进去。
 
@@ -180,14 +182,14 @@ npm run check            # 语法检查 + 身份自检 + 全部测试
 npm run check:identity   # 只跑身份自检
 ```
 
-**名字只有一处出处（`package.json` 的 `name`），其余标识都由它派生**（slug = 包名去掉 `dsh-`）。`scripts/check-identity.mjs` 会把这几处对一遍：cordis patch 的 `name`、客户端 `__ModuleLoader__.load({ id })`、插件市场认的 `PACKAGE_NAME`、页签 `TAB_IMPL_ID`、路由 `/agent-rules`、section `plugin:agent-rules`、提示变量 `agent_rules_body`、数据文件 `agent-rules.json`、页签 kind —— 它们必须一致。客户端注册 id 与包名不一致时，界面启动直接报「Failed to load plugins」，而宿主接口一切正常，**只 curl 接口的隔离自检根本抓不到这种错**（这个坑踩过一次，见 `test/client.test.mjs` 里那条按包名对齐的用例）。
+**名字只有一处出处（`package.json` 的 `name`），其余标识都由它派生**（slug = 包名去掉 `dsh-`）。`scripts/check-identity.mjs` 会把这几处对一遍：cordis patch 的 `name`、客户端 `__ModuleLoader__.load({ id })`、插件市场认的 `PACKAGE_NAME`、页签 `TAB_IMPL_ID`、路由 `/ian-rules`、section `plugin:ian-rules`、提示变量 `ian_rules_body`、数据文件 `ian-rules.json`、页签 kind —— 它们必须一致。客户端注册 id 与包名不一致时，界面启动直接报「Failed to load plugins」，而宿主接口一切正常，**只 curl 接口的隔离自检根本抓不到这种错**（这个坑踩过一次，见 `test/client.test.mjs` 里那条按包名对齐的用例）。
 
 同一个脚本还守住两件容易被「全局替换」误伤的事：
 
-- **更名前（`dsh-dev-rules`）的旧名字不许再出现在代码与配置里**。允许留下的例外逐条写在脚本的 `ALLOWED` 里 —— 目前 11 条，每条都要说明为什么可以不改（数据文件迁移的来源名、页签 kind 的兼容注册、Gitee 镜像地址……）。新增一条等于承认多欠了一笔账。
+- **历代更名前（`dsh-dev-rules`、`dsh-agent-rules`）的旧名字不许再出现在代码与配置里**。允许留下的例外逐条写在脚本的 `ALLOWED` 里 —— 目前 18 条，每条都要说明为什么可以不改（数据文件迁移的来源名、页签 kind 的兼容注册、Gitee 镜像地址……）。新增一条等于承认多欠了一笔账。
 - **Gitee 镜像地址必须仍是 `dev-rules`**：镜像没随更名改动，而「把文档里所有旧名字换成新名字」这种操作会顺手把它改掉 —— 那是文档里国内用户的安装路径，本地测试全绿也发现不了。写这条守卫时我自己就误伤了一次。
 
-于是**改名＝三步**：改 `package.json` 的 `name` → 改两个 `lib` 里 `LEGACY_*` 那几行说明 → 跑 `npm run check:identity` 看还差哪里。
+于是**改名＝三步**：改 `package.json` 的 `name` → 把旧名字补进两个 `lib` 里 `LEGACY_*` 那几行（历代名字的清单，由新到旧）→ 跑 `npm run check:identity` 看还差哪里。
 
 **改完先在隔离沙箱里验，别拿日常在用的那个 profile 试。** 宿主半体是在 profile 启动时加载的：一个有问题的改动足以让整个 DSH 起不来，那时你连界面都进不去，只能去终端里拆插件。
 
@@ -197,14 +199,14 @@ npm run sandbox:check   # 只做自检 + profile 组装，不启动（提交前�
 npm run sandbox:clean   # 删掉沙箱
 
 # 想验「使用者装到的到底是什么」：把来源换成发布的那份再起
-DSH_SANDBOX_SOURCE=github:Grant-Felix/dsh-agent-rules npm run sandbox
+DSH_SANDBOX_SOURCE=github:Grant-Felix/dsh-ian-rules npm run sandbox
 DSH_SANDBOX_SOURCE=git+https://gitee.com/Grant-Felix/dev-rules.git npm run sandbox
 ```
 
-沙箱有独立的 `DSH_HOME`，所以它读写的是自己的 `agent-rules.json`，**不会碰你的真实规则文件**；脚本还会拒绝把沙箱 home 指到真实 home。默认端口可用 `DSH_SANDBOX_PORT` 改。
+沙箱有独立的 `DSH_HOME`，所以它读写的是自己的 `ian-rules.json`，**不会碰你的真实规则文件**；脚本还会拒绝把沙箱 home 指到真实 home。默认端口可用 `DSH_SANDBOX_PORT` 改。
 
 - `lib/rules.js` 纯逻辑（规范化 / 路径匹配 / 生效规则 / 渲染 / 分组 / token 估算 / Markdown 往返），宿主、面板与测试共用；路径匹配的 win32 分支通过 platform 参数可测。
-- `lib/index.js` 宿主半体：存储、提示变量注入、`/agent-rules/*` 接口、`agent_rules` 工具。
+- `lib/index.js` 宿主半体：存储、提示变量注入、`/ian-rules/*` 接口、`ian_rules` 工具。
 - `lib/client.js` 浏览器半体：手写的 `window.__ModuleLoader__.load({ id, factory })` bundle，只依赖 `react`，不需要打包器；纯函数内部件（token 估算 / 导入合并 / 更新提示判定）通过 `exports.__internal` 暴露给测试。
 - `scripts/sandbox.sh`：上面那套隔离环境的实现（独立 `DSH_HOME` + 独立端口 + 安全闸）。
 - 测试：`test/rules.test.mjs`（逻辑 / 两级标题渲染）、`test/host.test.mjs`（接口 / 备份 / 409 / 403 / 415 / 400 / 软链回退 / 工具 / 多字节请求体跨块解码 / revision 不被自己的写盘事件推高）、`test/client.test.mjs`（槽位接线 / 服务晚出现 / 内部件 / 两列网格与卡片统一的源码级守卫）。
@@ -217,10 +219,12 @@ DSH_SANDBOX_SOURCE=git+https://gitee.com/Grant-Felix/dev-rules.git npm run sandb
 | 平台 | 角色 | 状态 |
 | --- | --- | --- |
 | 本地 Forgejo（私有，走回环） | **开发主仓**，代码与历史以它为准 | 已建仓并推送（默认分支 `main`） |
-| GitHub <https://github.com/Grant-Felix/dsh-agent-rules> | 对外窗口 + 反馈受理 | 已发布（公开，MIT） |
+| GitHub <https://github.com/Grant-Felix/dsh-ian-rules> | 对外窗口 + 反馈受理 | 已发布（公开，MIT） |
 | Gitee <https://gitee.com/Grant-Felix/dev-rules> | 国内镜像 + 同样受理反馈 | 已发布（由 GitHub 单向同步） |
 
 代码**单向**流动：本地 Forgejo → GitHub → Gitee，禁止把某个平台的提交反向直推到另一个平台（会造成历史分叉与重复改动）。两个平台上的 Issue 与 PR 都一样受理，但同一个问题只在**先提出的那一侧**开正式讨论，另一侧贴链接引导过去，避免两边各说各话。
+
+> **2026-10-05 更名**：GitHub 仓库由 `dsh-agent-rules` 更名为 `dsh-ian-rules`（GitHub 对旧地址自动重定向），插件包名与全部派生标识（slug `ian-rules`、路由 `/ian-rules`、数据文件 `ian-rules.json`、页签 kind、提示变量 `ian_rules_body`、模型工具 `ian_rules`）同步更换；上一代的名字只留在迁移与兼容那一小块里（见前文「更名迁移」）。Gitee 镜像地址仍是 `dev-rules`，未随更名改动。
 
 推送凭据按平台分开配置：每个 host 各有一个 git credential helper，且都**校验 `host=`**、只对自己那一个平台应答，其它 host 一律静默退出 —— 否则会把 A 平台的令牌回给 B 平台。
 
@@ -238,7 +242,7 @@ DSH_SANDBOX_SOURCE=git+https://gitee.com/Grant-Felix/dev-rules.git npm run sandb
 | --- | --- |
 | 本仓源代码（`lib/`、`test/` 等） | **MIT**（见 `LICENSE`） |
 | 本仓内的示例规则 | 随代码 MIT —— **全部虚构**，不是作者的真实规则 |
-| 作者本人的规则内容 | **不开源，也不在本仓**：只存在于作者本机的 `~/.dsh/agent-rules.json` |
+| 作者本人的规则内容 | **不开源，也不在本仓**：只存在于作者本机的 `~/.dsh/ian-rules.json` |
 | 使用者自己的规则内容 | 归使用者所有，与本项目许可无关 |
 
 范围与边界见 [`NOTICE.md`](NOTICE.md)。

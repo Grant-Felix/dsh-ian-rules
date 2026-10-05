@@ -7,6 +7,9 @@ yarn.lock
 # 本地运行产物
 *.log
 *.tmp
+ian-rules.json
+ian-rules.json.bak
+# 更名前历代的数据文件：用户本机可能还留着，别让工作区变脏
 agent-rules.json
 agent-rules.json.bak
 dev-rules.json

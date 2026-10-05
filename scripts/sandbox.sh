@@ -17,7 +17,7 @@
 #   DSH_SANDBOX_PORT    监听端口（默认 3199；传 0 让系统挑）
 #   DSH_SANDBOX_SOURCE  安装来源（默认 link:<仓库>）。想验「使用者装到的到底是什么」，
 #                       就传发布来源，例如：
-#                         DSH_SANDBOX_SOURCE=github:Grant-Felix/dsh-agent-rules npm run sandbox
+#                         DSH_SANDBOX_SOURCE=github:Grant-Felix/dsh-ian-rules npm run sandbox
 #                         DSH_SANDBOX_SOURCE=git+https://gitee.com/Grant-Felix/dev-rules.git npm run sandbox  # Gitee 镜像未随更名改动
 set -euo pipefail
 
@@ -28,8 +28,9 @@ source_spec="${DSH_SANDBOX_SOURCE:-link:$repo}"
 profile_dir="$sandbox_home/profiles/web"
 # 包名从清单里读，不在这里再写一份：改名的风险点正是「文档/脚本里还有一处旧名」。
 pkg_name="$(sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$repo/package.json" | head -1)"
-# 更名前用的包名：沙箱里如果还装着它，装新名字之前要先摘掉，否则 profile 会同时装两份
-legacy_name="dsh-dev-rules"
+# 更名前用过的包名（由新到旧）：沙箱里如果还装着它们，装新名字之前要先摘掉，
+# 否则 profile 会同时装两份，而 bundle 阵容里还挂着旧包名。
+legacy_names=("dsh-agent-rules" "dsh-dev-rules")
 [ -n "$pkg_name" ] || { echo "读不出 package.json 的 name。" >&2; exit 1; }
 
 command -v dsh >/dev/null 2>&1 || {
@@ -69,12 +70,14 @@ ensure_profile() {
   else
     echo "在沙箱初始化 profile 并安装 $source_spec"
   fi
-  # 更名（dsh-dev-rules → dsh-agent-rules）之后，旧名字那条依赖会让 profile 同时装两份，
-  # 而 bundle 阵容里还挂着旧包名。装新名字之前先把它摘掉。
-  if grep -qF "\"$legacy_name\"" "$profile_dir/package.json" 2>/dev/null; then
-    echo "沙箱里还装着更名前的 $legacy_name → 先移除"
-    dsh plugin --profile web remove "$legacy_name" || true
-  fi
+  # 更名（dsh-agent-rules → dsh-ian-rules，更早还有 dsh-dev-rules）之后，旧名字那条依赖会让
+  # profile 同时装两份，而 bundle 阵容里还挂着旧包名。装新名字之前先把它们逐个摘掉。
+  for legacy_name in "${legacy_names[@]}"; do
+    if grep -qF "\"$legacy_name\"" "$profile_dir/package.json" 2>/dev/null; then
+      echo "沙箱里还装着更名前的 $legacy_name → 先移除"
+      dsh plugin --profile web remove "$legacy_name" || true
+    fi
+  done
   dsh plugin --profile web add "$source_spec"
   # 自动登记 bundle 是 dsh plugin 的职责，但「装上了却没进阵容」会让后面全部失真，
   # 所以这里显式确认一次，不靠假设。
@@ -89,7 +92,7 @@ cmd="${1:-boot}"
 # 客户端 bundle 注册的 id 必须等于包名。DSH 的客户端模块图是按**包名**建行的
 # （dsh-client-modules：`table.set(packageName, { entry: graphRow(packageName, …) })`），
 # 对不上就在启动时报「Failed to load plugins：loaded without registering …」——
-# 界面直接打不开，而宿主接口还是好的：只 curl /agent-rules/state 根本看不出来。
+# 界面直接打不开，而宿主接口还是好的：只 curl /ian-rules/state 根本看不出来。
 #
 # 仓库里的用例只保证「检出里的文件」一致；这里保证**沙箱里装的那一份**一致 ——
 # 来源换成 github: / git+… 时，两者未必是同一份代码。
@@ -145,7 +148,7 @@ case "$cmd" in
   boot)
     ensure_profile
     echo "隔离实例：DSH_HOME=$sandbox_home  端口=$port  来源=$source_spec"
-    echo "（它读沙箱自己的 agent-rules.json，不会碰 ~/.dsh/agent-rules.json）"
+    echo "（它读沙箱自己的 ian-rules.json，不会碰 ~/.dsh/ian-rules.json）"
     # 改完代码重跑这一条即可；--no-open 免得每次弹浏览器
     exec dsh --profile web --port "$port" --no-open
     ;;

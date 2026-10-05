@@ -152,10 +152,10 @@ test('client bundle：按右侧栏契约注册 tab 类型与 tab 体，并可整
 	exports.apply(ctx)
 
 	// 1) tab 类型 + guide 行（右侧栏页面列表里的一行）。
-	//    两份注册：当前 kind 一份，更名前的 kind 一份（后者只为让升级前已开着的页签不变成孤儿）。
-	assert.equal(tabTypes.length, 2)
-	const type = tabTypes.find((entry) => entry.kind === 'agent-rules')
-	assert.equal(type.id, 'dsh-agent-rules')
+	//    三份注册：当前 kind 一份，历代更名前的 kind 各一份（后者只为让升级前已开着的页签不变成孤儿）。
+	assert.equal(tabTypes.length, 3)
+	const type = tabTypes.find((entry) => entry.kind === 'ian-rules')
+	assert.equal(type.id, 'dsh-ian-rules')
 	assert.equal(type.priority, 'extension')
 	assert.equal(type.title(), '开发规则')
 	assert.equal(type.guide.length, 1)
@@ -163,16 +163,21 @@ test('client bundle：按右侧栏契约注册 tab 类型与 tab 体，并可整
 	assert.equal(typeof type.guide[0].description(), 'string')
 
 	// 兼容注册**必须没有 guide**：页面列表的条目由 guide 贡献，带了就会多出一行「开发规则」
-	const legacy = tabTypes.find((entry) => entry.kind === 'dev-rules')
-	assert.ok(legacy !== undefined, '应为更名前的 kind 留一份兼容注册')
-	assert.equal(legacy.id, 'dsh-agent-rules:legacy-kind', 'id 不能与当前注册撞（同一 id 二次注册会抛错）')
-	assert.equal(legacy.guide, undefined, '兼容注册不能往页面列表里再加一行')
+	for (const [legacyKind, legacyId] of [
+		['agent-rules', 'dsh-ian-rules:legacy-agent-rules'],
+		['dev-rules', 'dsh-ian-rules:legacy-dev-rules'],
+	]) {
+		const legacy = tabTypes.find((entry) => entry.kind === legacyKind)
+		assert.ok(legacy !== undefined, `应为更名前的 kind「${legacyKind}」留一份兼容注册`)
+		assert.equal(legacy.id, legacyId, 'id 不能与当前注册撞（同一 id 二次注册会抛错）')
+		assert.equal(legacy.guide, undefined, '兼容注册不能往页面列表里再加一行')
+	}
 
 	// 2) tab 体：key 必须与各自 tab 类型的实现 id 一致（正文按 id 挂载）
-	assert.equal(registrations.length, 2)
+	assert.equal(registrations.length, 3)
 	assert.deepEqual(
 		registrations.map((entry) => entry.key).sort(),
-		['dsh-agent-rules', 'dsh-agent-rules:legacy-kind'],
+		['dsh-ian-rules', 'dsh-ian-rules:legacy-agent-rules', 'dsh-ian-rules:legacy-dev-rules'],
 	)
 	assert.equal(registrations.every((entry) => entry.name === 'sidebar.right.pane.tab'), true)
 
@@ -434,7 +439,7 @@ const SHA_NEW = 'd054f3d1a2b3c4d5e6f708192a3b4c5d6e7f8091'
 const CAPS = { rollback: true, restart: true }
 const NO_RESTART = { rollback: false, restart: false }
 const BEHIND = {
-	name: 'dsh-agent-rules',
+	name: 'dsh-ian-rules',
 	source: 'github',
 	installedVersion: SHA_OLD,
 	latestVersion: SHA_NEW,
@@ -660,7 +665,7 @@ test('client 内部件：从实测响应体里取 package / operation（照契�
 	// 下面三份是照本机 dshmarket（UPDATE-API-v1）实测响应抄下来的形状
 	const status = updateStatusOf({
 		schema: 'dsh-market/update-api/v1',
-		package: { name: 'dsh-agent-rules', source: 'github', installedVersion: SHA_OLD, latestVersion: SHA_NEW, updateAvailable: true, channelSwitch: null },
+		package: { name: 'dsh-ian-rules', source: 'github', installedVersion: SHA_OLD, latestVersion: SHA_NEW, updateAvailable: true, channelSwitch: null },
 	})
 	assert.equal(status.updateAvailable, true)
 	assert.equal(status.installedVersion, SHA_OLD)
@@ -671,7 +676,7 @@ test('client 内部件：从实测响应体里取 package / operation（照契�
 			schema: 'dsh-market/update-api/v1',
 			operationId: '12227-1789986459219-update-1',
 			kind: 'update',
-			packageName: 'dsh-agent-rules',
+			packageName: 'dsh-ian-rules',
 			state: 'running',
 			createdAt: 1,
 			startedAt: 2,
@@ -733,12 +738,12 @@ test('client 内部件：文件路径把 $DSH_HOME 缩成 ~（窄栏里一行放
 	const { registration, require } = loadBundle()
 	const { prettyPath } = registration.factory(require).__internal
 
-	assert.equal(prettyPath('/home/felix/.dsh/agent-rules.json', '/home/felix/.dsh'), '~/agent-rules.json')
-	assert.equal(prettyPath('/home/felix/.dsh/agent-rules.json.bak', '/home/felix/.dsh'), '~/agent-rules.json.bak')
+	assert.equal(prettyPath('/home/felix/.dsh/ian-rules.json', '/home/felix/.dsh'), '~/ian-rules.json')
+	assert.equal(prettyPath('/home/felix/.dsh/ian-rules.json.bak', '/home/felix/.dsh'), '~/ian-rules.json.bak')
 	assert.equal(prettyPath('/home/felix/.dsh', '/home/felix/.dsh'), '~')
 	// 不在 home 下面、或宿主没给 home：原样显示，不做猜测
-	assert.equal(prettyPath('/etc/agent-rules.json', '/home/felix/.dsh'), '/etc/agent-rules.json')
-	assert.equal(prettyPath('/home/felix/.dsh/agent-rules.json', ''), '/home/felix/.dsh/agent-rules.json')
+	assert.equal(prettyPath('/etc/ian-rules.json', '/home/felix/.dsh'), '/etc/ian-rules.json')
+	assert.equal(prettyPath('/home/felix/.dsh/ian-rules.json', ''), '/home/felix/.dsh/ian-rules.json')
 	assert.equal(prettyPath(undefined, '/home/felix/.dsh'), '')
 })
 
@@ -835,13 +840,14 @@ test('client 内部件：换过路由后的过渡回退（只在 404 且旧路�
 	const { registration, require } = loadBundle()
 	const { legacyRouteFor } = registration.factory(require).__internal
 
-	// 新路由 404、旧路由答得上来 → 回退（这正是「页面已换新客户端、宿主还没重启」的那一刻）
-	assert.equal(legacyRouteFor(404, 200), '/dev-rules')
+	// 新路由 404、某条旧路由答得上来 → 回退到它（这正是「页面已换新客户端、宿主还没重启」的那一刻）
+	assert.equal(legacyRouteFor('/agent-rules', 404, 200), '/agent-rules')
+	assert.equal(legacyRouteFor('/dev-rules', 404, 200), '/dev-rules')
 	// 旧路由也 404（路径写错、接口真没了）→ 不回退，别把配置错误伪装成版本差异
-	assert.equal(legacyRouteFor(404, 404), null)
+	assert.equal(legacyRouteFor('/agent-rules', 404, 404), null)
 	// 非 404 的失败（403 跨站 / 500 宿主内部错）照旧原样上报，不换路
-	assert.equal(legacyRouteFor(500, 200), null)
-	assert.equal(legacyRouteFor(403, 200), null)
+	assert.equal(legacyRouteFor('/agent-rules', 500, 200), null)
+	assert.equal(legacyRouteFor('/agent-rules', 403, 200), null)
 })
 
 test('client 内部件：并发下先切换的请求不能害后来的请求拿 404 当结果', async () => {
@@ -850,13 +856,15 @@ test('client 内部件：并发下先切换的请求不能害后来的请求拿 
 	const { registration, require } = loadBundle()
 	const { callWithRouteFallback } = registration.factory(require).__internal
 
-	const state = { route: '/agent-rules' };
+	const state = { route: '/ian-rules' };
 	let releaseSlow = null;
+	// 更前一代（/agent-rules）的宿主已经不存在，真正还活着的旧宿主是 /dev-rules 那一代
 	const doFetch = (url) => {
-		if (url === '/agent-rules/slow') return new Promise((resolve) => { releaseSlow = () => resolve({ status: 404 }); })
+		if (url === '/ian-rules/slow') return new Promise((resolve) => { releaseSlow = () => resolve({ status: 404 }); })
 		if (url === '/dev-rules/slow') return Promise.resolve({ status: 200 })
-		if (url === '/agent-rules/fast') return Promise.resolve({ status: 404 })
+		if (url === '/ian-rules/fast') return Promise.resolve({ status: 404 })
 		if (url === '/dev-rules/fast') return Promise.resolve({ status: 200 })
+		if (url === '/agent-rules/slow' || url === '/agent-rules/fast') return Promise.resolve({ status: 404 })
 		return Promise.resolve({ status: 500 })
 	}
 

@@ -11,11 +11,11 @@
  *   - `lib/index.js` / `lib/client.js` 里由名字派生的路由、section 名、提示变量、文件名、
  *     页签 kind
  * 以前这些是七处独立的字符串字面量，改一处漏一处只能靠人眼扫。这里把它们放在一起核对：
- * 约定 **包名去掉 `dsh-` 前缀就是 slug**（`dsh-agent-rules` → `agent-rules`），其余标识全部
- * 由 slug 派生。于是「改名」＝改 `package.json` 的 `name`、改两个 lib 里 `LEGACY_*` 那几行
- * 说明，然后跑 `npm run check:identity` 看还差哪里。
+ * 约定 **包名去掉 `dsh-` 前缀就是 slug**（`dsh-ian-rules` → `ian-rules`），其余标识全部
+ * 由 slug 派生。于是「改名」＝改 `package.json` 的 `name`、把旧名字补进两个 lib 里
+ * `LEGACY_*` 那几行（历代名字的清单，由新到旧），然后跑 `npm run check:identity` 看还差哪里。
  *
- * 顺带守住第二条线：更名前的旧名字不许再出现在代码与配置里（文档/迁移/兼容那几处例外
+ * 顺带守住第二条线：历代更名前的旧名字不许再出现在代码与配置里（文档/迁移/兼容那几处例外
  * 在下面的 ALLOWED 里逐条写明理由 —— 这份清单就是「哪些旧名字是故意留下的」的完整答案）。
  *
  * 用法：
@@ -30,13 +30,18 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 /** 扫描时跳过的目录：都不是仓库内容。 */
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.sandbox', '.visual', '.pnpm-store'])
 
-/** 更名前的旧名字。每一处允许的例外都在 ALLOWED 里写明理由。 */
+/**
+ * 更名前历代的旧名字（由新到旧）。每一处允许的例外都在 ALLOWED 里写明理由。
+ * 注意长名字（`dsh-agent-rules`）会被短名字（`agent-rules`）的子串匹配覆盖，所以这里只列短的那个。
+ */
 const BANNED = [
-  { token: 'dsh-dev-rules', label: '旧包名' },
-  { token: 'dev-rules', label: '旧 slug / 旧数据文件名 / 旧页签 kind' },
-  { token: 'dev_rules', label: '旧提示变量名 / 旧工具名' },
-  { token: '--dr-', label: '旧的样式变量前缀' },
-  { token: /\bdr_/, label: '旧的类名前缀' },
+  { token: 'agent-rules', label: '上一代包名 / 上一代 slug / 上一代数据文件名 / 上一代页签 kind' },
+  { token: 'agent_rules', label: '上一代提示变量名 / 上一代工具名' },
+  { token: 'dsh-dev-rules', label: '更早一代的包名' },
+  { token: 'dev-rules', label: '更早一代的 slug / 数据文件名 / 页签 kind' },
+  { token: 'dev_rules', label: '更早一代的提示变量名 / 工具名' },
+  { token: '--dr-', label: '更早一代的样式变量前缀' },
+  { token: /\bdr_/, label: '更早一代的类名前缀' },
 ]
 
 /**
@@ -44,17 +49,24 @@ const BANNED = [
  * 清单越短越好，新增一条就等于承认多欠了一笔技术债。
  */
 const ALLOWED = [
-  { file: 'lib/index.js', token: 'dev-rules', why: 'LEGACY_FILE_NAME：更名前那份数据文件的**迁移来源**，必须写它才能把老用户的规则搬过来' },
+  { file: 'lib/index.js', token: 'agent-rules', why: 'LEGACY_FILE_NAMES：上一代数据文件的**迁移来源**，必须写它才能把老用户的规则搬过来' },
+  { file: 'lib/index.js', token: 'dev-rules', why: 'LEGACY_FILE_NAMES：更早一代数据文件的**迁移来源**，同理' },
   { file: 'lib/index.js', token: 'dsh-dev-rules', why: '同一处的中文注释（说清是从哪个名字迁过来的）' },
-  { file: 'lib/client.js', token: 'dev-rules', why: '两处过渡兼容：LEGACY_TAB_KIND（更名前已打开的页签持久化的就是这个 kind）与 LEGACY_ROUTE（页面已换新客户端、宿主还没重启时把请求退回去问一次）' },
-  { file: 'test/host.test.mjs', token: 'dev-rules', why: '迁移用例自己造一份旧名字的数据文件来验迁移' },
-  { file: 'test/client.test.mjs', token: 'dev-rules', why: '断言兼容注册存在、且**不能带 guide**（带了页面列表会多一行）' },
-  { file: 'scripts/sandbox.sh', token: 'dsh-dev-rules', why: '沙箱要先摘掉旧包名的依赖，否则 profile 会同时装两份' },
+  { file: 'lib/client.js', token: 'agent-rules', why: '两处过渡兼容：LEGACY_TAB_KINDS（上一代已打开的页签持久化的就是这个 kind）与 LEGACY_ROUTES（页面已换新客户端、宿主还没重启时把请求退回去问一次）' },
+  { file: 'lib/client.js', token: 'dev-rules', why: '同上，更早一代的那一个名字' },
+  { file: 'test/host.test.mjs', token: 'agent-rules', why: '迁移用例自己造一份上一代名字的数据文件来验迁移（含「两代都在时取新的」）' },
+  { file: 'test/host.test.mjs', token: 'dev-rules', why: '同上，更早一代' },
+  { file: 'test/client.test.mjs', token: 'agent-rules', why: '断言上一代的兼容注册存在、且**不能带 guide**（带了页面列表会多一行）' },
+  { file: 'test/client.test.mjs', token: 'dev-rules', why: '同上，更早一代' },
+  { file: 'scripts/sandbox.sh', token: 'agent-rules', why: '沙箱要先摘掉上一代包名的依赖，否则 profile 会同时装两份' },
+  { file: 'scripts/sandbox.sh', token: 'dsh-dev-rules', why: '同上，更早一代的包名' },
+  { file: 'scripts/sandbox.sh', token: 'dev-rules', why: 'Gitee 镜像地址（镜像未随更名改动）' },
+  { file: 'README.md', token: 'agent-rules', why: '迁移说明里要点明「从哪个名字迁过来的」' },
   { file: 'README.md', token: 'dev-rules', why: '迁移说明 + Gitee 镜像地址（镜像未随更名改动）' },
   { file: 'README.md', token: 'dsh-dev-rules', why: '迁移说明里要点明「从哪个名字迁过来的」' },
-  { file: 'scripts/sandbox.sh', token: 'dev-rules', why: 'Gitee 镜像地址（未随更名改动）' },
   { file: 'NOTICE.md', token: 'dev-rules', why: '历史沿革说明' },
-  { file: '.gitignore', token: 'dev-rules', why: '旧数据文件仍在本地时不该让工作区变脏' },
+  { file: '.gitignore', token: 'agent-rules', why: '上一代数据文件仍在本地时不该让工作区变脏' },
+  { file: '.gitignore', token: 'dev-rules', why: '更早一代数据文件仍在本地时不该让工作区变脏' },
 ]
 
 /** 递归列出仓库里的文本文件（相对路径）。 */

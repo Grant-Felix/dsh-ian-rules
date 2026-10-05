@@ -1,8 +1,8 @@
-# dsh-agent-rules bundle patch：把本插件行插入 profile 阵容。
+# dsh-ian-rules bundle patch：把本插件行插入 profile 阵容。
 #
 # 作为 profile bundle 层（package.json 的 dsh.bundle.patch 字段）叠加到
 # dsh-base 之上；启用方式：
-#   dsh plugin --profile web add dsh-agent-rules         # 从 npm 装
+#   dsh plugin --profile web add dsh-ian-rules           # 从 npm 装
 #   dsh plugin --profile web add link:/path/to/本目录     # 仓库开发调试
 # `dsh plugin` 就是 pnpm 透传，装完会自动把本包登记进 dsh.profile.bundles，
 # 不必手工改 profile 的 package.json。
@@ -10,8 +10,8 @@
 # 行内容为按包名注册的裸插件行：`name` 必须与包名一致（它是要加载的模块
 # 名），`id` 只是这一行的稳定标识、可与包名不同（如 dsh-docker 用 id: docker）。
 # exports "." 的 node 半体运行在宿主进程（规则存储 / 系统提示注入 / HTTP
-# 面板接口 / agent_rules 工具），package.json 的 dsh.client 声明把 exports
+# 面板接口 / ian_rules 工具），package.json 的 dsh.client 声明把 exports
 # "./client" 的浏览器半体（侧边栏「开发规则」面板）加载进 web GUI。
 - insert:
-    - id: agent-rules
-      name: 'dsh-agent-rules'
+    - id: ian-rules
+      name: 'dsh-ian-rules'
