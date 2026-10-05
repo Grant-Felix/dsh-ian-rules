@@ -1,6 +1,6 @@
-# dsh-ian-rules · Felix 项目开发规则
+# dsh-ian-rules · 项目开发规则
 
-DSH（DeepSeek Harness）个人插件：把你自己的一套**项目开发规则**交给 DSH，让 agent 在开发项目时自动遵守。
+DSH（DeepSeek Harness）开源插件（MIT）：把你自己的一套**项目开发规则**交给 DSH，让 agent 在开发项目时自动遵守。代码可自由使用、修改与分发，也欢迎读源码学习研究。
 
 - **面板**：Web GUI **右侧栏**新增「开发规则」页（与「Docker 容器」并列，走 DSH 原生 `sidebarRightTabs` + `sidebar.right.pane.tab` 契约），可视化维护规则（全局 + 按项目）。
 - **自动注入**：每个会话组装系统提示时，按该会话的工作目录解析生效规则并注入，无需手工提醒。
@@ -139,7 +139,7 @@ dsh plugin --profile web add link:$PWD
 渲染形如（**两级标题**：第一级是「全局 / 哪个项目」，第二级才是你的分组）：
 
 ```markdown
-# 项目开发规则（Felix 项目开发规则）
+# 项目开发规则
 
 以下是本机用户维护的开发规则……如有冲突，以后者为准。
 

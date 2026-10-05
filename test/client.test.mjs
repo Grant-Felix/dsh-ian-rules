@@ -738,13 +738,13 @@ test('client 内部件：文件路径把 $DSH_HOME 缩成 ~（窄栏里一行放
 	const { registration, require } = loadBundle()
 	const { prettyPath } = registration.factory(require).__internal
 
-	assert.equal(prettyPath('/home/felix/.dsh/ian-rules.json', '/home/felix/.dsh'), '~/ian-rules.json')
-	assert.equal(prettyPath('/home/felix/.dsh/ian-rules.json.bak', '/home/felix/.dsh'), '~/ian-rules.json.bak')
-	assert.equal(prettyPath('/home/felix/.dsh', '/home/felix/.dsh'), '~')
+	assert.equal(prettyPath('/home/user/.dsh/ian-rules.json', '/home/user/.dsh'), '~/ian-rules.json')
+	assert.equal(prettyPath('/home/user/.dsh/ian-rules.json.bak', '/home/user/.dsh'), '~/ian-rules.json.bak')
+	assert.equal(prettyPath('/home/user/.dsh', '/home/user/.dsh'), '~')
 	// 不在 home 下面、或宿主没给 home：原样显示，不做猜测
-	assert.equal(prettyPath('/etc/ian-rules.json', '/home/felix/.dsh'), '/etc/ian-rules.json')
-	assert.equal(prettyPath('/home/felix/.dsh/ian-rules.json', ''), '/home/felix/.dsh/ian-rules.json')
-	assert.equal(prettyPath(undefined, '/home/felix/.dsh'), '')
+	assert.equal(prettyPath('/etc/ian-rules.json', '/home/user/.dsh'), '/etc/ian-rules.json')
+	assert.equal(prettyPath('/home/user/.dsh/ian-rules.json', ''), '/home/user/.dsh/ian-rules.json')
+	assert.equal(prettyPath(undefined, '/home/user/.dsh'), '')
 })
 
 test('client bundle：列式字段里的输入框不许被 flex-basis 撑成高盒子（源码级守卫）', () => {
