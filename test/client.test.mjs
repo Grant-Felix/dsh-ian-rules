@@ -247,19 +247,35 @@ test('client bundle：「放弃修改并重新载入」走磁盘重读接口（�
 	assert.match(source, /load\(true\)/, '「放弃修改并重新载入」按钮必须要求从磁盘读')
 })
 
+test('client bundle：「只对新会话生效」的保存走 applyMode=next-session（源码级守卫）', () => {
+	// 这条改动的全部内容是「哪个动作打哪个参数」：组件在 Node 里渲染不了，只能钉住接线。
+	const source = readFileSync(bundlePath, 'utf8')
+	assert.match(source, /saveState = \(doc, revision, applyMode\)/, '保存接口必须能带 applyMode')
+	assert.match(source, /save\('next-session'\)/, '「保存（只对新会话生效）」必须显式带 next-session')
+	assert.match(source, /save\('now'\)/, '解冻必须走 now，否则钉住的会话永远切不回来')
+	assert.match(source, /deferredCount > 0/, '有会话被钉住时必须把状态显示在明面上')
+	assert.match(source, /resumeLiveSessions/, '必须给出「让它们改用新规则」的入口')
+	// 主动作与快捷键都必须走不带参数的那一层：直接把 onClick 接到 save 上，
+	// 点击事件会被当成 applyMode 传下去（现在是碰巧被当成 now，属于定时炸弹）。
+	assert.match(source, /onClick: saveNow/, '主动作必须接 saveNow')
+	assert.match(source, /saveNow\(\);/, 'Ctrl\/Cmd+S 必须接 saveNow')
+})
+
 test('client 内部件：上限快照与卡片体量标签', () => {
 	const { registration, require } = loadBundle()
 	const exports = registration.factory(require)
 	const { limitsOf, sizeLabel } = exports.__internal
 
 	// 上限只有一处出处（宿主随 meta 下发）；宿主没给就留空，不在这里复制常量
-	assert.deepEqual(limitsOf({ limits: { title: 120, group: 60, content: 4000, rules: 300 } }), {
+	assert.deepEqual(limitsOf({ limits: { title: 120, group: 60, content: 4000, rules: 300, tags: 8, tag: 24 } }), {
 		title: 120,
 		group: 60,
 		content: 4000,
 		rules: 300,
+		tags: 8,
+		tag: 24,
 	})
-	const unknown = { title: undefined, group: undefined, content: undefined, rules: undefined }
+	const unknown = { title: undefined, group: undefined, content: undefined, rules: undefined, tags: undefined, tag: undefined }
 	assert.deepEqual(limitsOf(null), unknown)
 	assert.deepEqual(limitsOf({}), unknown)
 	assert.deepEqual(limitsOf({ limits: { content: 0, title: -1, group: 'x', rules: Number.NaN } }), unknown)
@@ -273,6 +289,44 @@ test('client 内部件：上限快照与卡片体量标签', () => {
 		sizeLabel({ title: 'T'.repeat(120), content: 'c'.repeat(4000) }, { title: 120, content: 4000 }),
 		'约 4120 字（标题上限 120 / 正文上限 4000）',
 	)
+})
+
+test('client 内部件：标签切分与「按场景」体量标签', () => {
+	const { registration, require } = loadBundle()
+	const { splitTags, sizeLabel, collectTags, matchesFilter } = registration.factory(require).__internal
+
+	assert.deepEqual(splitTags('依赖、提交'), ['依赖', '提交'])
+	assert.deepEqual(splitTags('a,b，c；d  e'), ['a', 'b', 'c', 'd', 'e'])
+	// 先截长再去重：两条超长标签截断后是同一个，只该留一个
+	assert.deepEqual(splitTags('x'.repeat(30) + '、' + 'x'.repeat(40)), ['x'.repeat(24)])
+	assert.deepEqual(splitTags('   、、 '), [])
+	assert.equal(splitTags(Array.from({ length: 20 }, (_, index) => 'T' + String(index)).join('、')).length, 8, '最多 8 个')
+	// 宿主下发的上限优先于兜底常量
+	assert.equal(splitTags('a、b、c', { tags: 2, tag: 24 }).length, 2)
+	assert.equal(splitTags('abcdef', { tag: 3 })[0], 'abc')
+
+	// 「按场景」的规则不是每轮都注入，体量标签必须标出来
+	assert.equal(sizeLabel({ title: 'A', content: 'bc' }, {}), '约 3 字')
+	assert.equal(sizeLabel({ title: 'A', content: 'bc', mode: 'auto' }, {}), '按场景 · 约 3 字')
+	assert.equal(sizeLabel({ title: 'A', content: 'bc', mode: 'auto' }, { content: 2 }), '按场景 · 约 3 字（正文上限 2）')
+
+	// 标签参与搜索与自动补全
+	const rule = { title: 'A', content: 'b', group: '', tags: ['依赖', '提交'] }
+	assert.equal(matchesFilter(rule, '依赖', ''), true)
+	assert.equal(matchesFilter(rule, '不存在', ''), false)
+	assert.deepEqual(collectTags([rule, { tags: ['依赖'] }, { tags: 'nope' }, { tags: null }, {}]), ['依赖', '提交'])
+})
+
+test('client bundle：卡片上的「按场景」开关、标签输入与目录预览（源码级守卫）', () => {
+	// 组件在 Node 里渲染不了，只能钉住接线：这几处少一个，用户就没法表达「按场景」
+	const source = readFileSync(bundlePath, 'utf8')
+	assert.match(source, /onPatch\(\{ mode: value \? 'auto' : 'always' \}\)/, '必须有「按场景」勾选框并写回 mode')
+	assert.match(source, /splitTags\(event\.target\.value, limits\)/, '标签输入必须切分后写回 tags')
+	assert.match(source, /id: 'ar-tags'/, '标签要有自动补全')
+	assert.match(source, /sceneIndex\.length > 0/, '效果预览必须展示「按场景」规则目录')
+	// 总开关：没有它，用户在面板里永远打不开按场景注入
+	assert.match(source, /draft\.sceneMatching = value \? 'auto' : 'off'/, '必须有「启用按场景注入」总开关')
+	assert.match(source, /autoRuleCount > 0/, '标了「按场景」的条数要显示出来')
 })
 
 test('client 内部件：保存前拦下会被宿主静默丢掉的内容', () => {
@@ -876,4 +930,26 @@ test('client 内部件：并发下先切换的请求不能害后来的请求拿 
 	releaseSlow()                                                  // 乙的主请求这时才回 404
 	const response = await slow
 	assert.equal(response.status, 200, '乙必须采用自己那次成功的重试结果，而不是那份 404')
+})
+
+test('client 内部件：场景模拟摘要与接线（源码级守卫）', () => {
+	const { registration, require } = loadBundle()
+	const { resultSummaryOfScene } = registration.factory(require).__internal
+
+	// 没有可命中的规则：先告诉用户怎么让它有用
+	assert.match(resultSummaryOfScene({ total: 0, matched: [], near: [], sceneMatching: true }), /没有标「按场景」的规则/)
+	// 有规则但总开关关着：说清是没开机，并说明下面给的是「开机后会怎样」
+	assert.match(resultSummaryOfScene({ total: 2, matched: [], near: [], sceneMatching: false }), /总开关还关着/)
+	// 开着但这句话不相关
+	assert.match(resultSummaryOfScene({ total: 2, matched: [], near: [], sceneMatching: true }), /都不相关/)
+	// 命中：报条数与体量，并带上预算（用户要能判断会不会被预算挤掉）
+	assert.match(
+		resultSummaryOfScene({ total: 3, matched: [{ chars: 10 }, { chars: 5 }], near: [], sceneMatching: true, budget: 2000 }),
+		/命中 2 \/ 3 条 · 共 15 字（预算 2000 字）/,
+	)
+
+	const source = readFileSync(bundlePath, 'utf8')
+	// 模拟器打的是 /scene，不是 /preview：模拟只回答「会命中什么」，不改任何状态
+	assert.match(source, /postJson\('\/scene'/, '场景模拟器必须打 /scene')
+	assert.match(source, /draft\.sceneLog = value/, '命中日志开关必须写回文档')
 })

@@ -12,6 +12,7 @@ import {
 	estimateTokens,
 	groupNames,
 	matchProject,
+	matchProjects,
 	normalizePath,
 	parseMarkdownDoc,
 	renderRules,
@@ -113,6 +114,74 @@ test('effectiveRules：追加与覆盖两种模式', () => {
 	assert.equal(plain.project, null)
 })
 
+test('matchProjects：返回完整命中链，由外到内', () => {
+	const doc = sanitizeDoc({
+		projects: [
+			{ path: '/tmp/mono/packages/a', rules: [] },
+			{ path: '/tmp/mono', rules: [] },
+			{ path: '/tmp/mono/packages/a/deep', enabled: false, rules: [] },
+		],
+	})
+	assert.deepEqual(matchProjects(doc, '/tmp/mono/packages/a/src').map((p) => p.path), [
+		posix('/tmp/mono'),
+		posix('/tmp/mono/packages/a'),
+	])
+	// 单命中时与 matchProject 一致
+	assert.deepEqual(matchProjects(doc, '/tmp/mono/x').map((p) => p.path), [posix('/tmp/mono')])
+	assert.equal(matchProject(doc, '/tmp/mono/x').path, posix('/tmp/mono'))
+	// 停用的项目不进链；命中不到就是空数组
+	assert.deepEqual(matchProjects(doc, '/tmp/mono/packages/a/deep').map((p) => p.path), [posix('/tmp/mono'), posix('/tmp/mono/packages/a')])
+	assert.deepEqual(matchProjects(doc, ''), [])
+})
+
+test('effectiveRules：monorepo 父子叠加，父级不再被静默丢弃', () => {
+	const doc = sanitizeDoc({
+		global: [{ id: 'g1', title: 'G', content: 'g' }],
+		projects: [
+			{ path: '/repo', mode: 'append', rules: [{ id: 'root', title: '根级约定', content: '统一用 pnpm' }] },
+			{ path: '/repo/packages/a', mode: 'append', rules: [{ id: 'leaf', title: '子包约定', content: 'A 包走 esm' }] },
+		],
+	})
+	const effective = effectiveRules(doc, '/repo/packages/a/src')
+	// 顺序：全局 → 父级 → 子级
+	assert.deepEqual(effective.rules.map((rule) => rule.id), ['g1', 'root', 'leaf'])
+	assert.equal(effective.project.path, posix('/repo/packages/a'))
+	assert.deepEqual(effective.inheritedProjects.map((p) => p.path), [posix('/repo')])
+	assert.equal(effective.override, false)
+	// 渲染里要说明继承发生了，并且确实注入了父级规则
+	const text = renderRules(doc, '/repo/packages/a/src')
+	assert.match(text, /根级约定/)
+	assert.match(text, /本段含继承自上层项目的规则（父级在前）：\/repo/)
+})
+
+test('effectiveRules：层叠 override —— 链上最后一个覆盖项目挡掉它之上的全部层', () => {
+	const base = {
+		global: [{ id: 'g1', title: 'G', content: 'g' }],
+		projects: [
+			{ id: 'root', path: '/repo', mode: 'append', rules: [{ id: 'root', title: '根', content: 'r' }] },
+			{ id: 'leaf', path: '/repo/pkg', mode: 'append', rules: [{ id: 'leaf', title: '子', content: 'l' }] },
+		],
+	}
+	// 父 override + 子 append：全局被挡，父与子的规则都生效
+	const parentOverride = effectiveRules(sanitizeDoc({ ...base, projects: [ { ...base.projects[0], mode: 'override' }, base.projects[1] ] }), '/repo/pkg')
+	assert.deepEqual(parentOverride.rules.map((rule) => rule.id), ['root', 'leaf'])
+	assert.equal(parentOverride.override, true)
+	assert.equal(parentOverride.suppressedGlobalRules.length, 1)
+
+	// 子 override：父级与全局都被挡（覆盖上层全部）
+	const leafOverride = effectiveRules(sanitizeDoc({ ...base, projects: [base.projects[0], { ...base.projects[1], mode: 'override' }] }), '/repo/pkg')
+	assert.deepEqual(leafOverride.rules.map((rule) => rule.id), ['leaf'])
+	assert.deepEqual(leafOverride.inheritedProjects, [])
+	assert.equal(leafOverride.project.path, posix('/repo/pkg'))
+
+	// 单层 override：与旧行为一致
+	const single = sanitizeDoc({
+		global: [{ id: 'g1', title: 'G', content: 'g' }],
+		projects: [{ path: '/repo', mode: 'override', rules: [{ id: 'p', title: 'P', content: 'p' }] }],
+	})
+	assert.deepEqual(effectiveRules(single, '/repo').rules.map((rule) => rule.id), ['p'])
+})
+
 test('renderRules：无生效规则就返回空串（等于不注入）', () => {
 	assert.equal(renderRules(emptyDoc(), '/tmp/x'), '')
 	assert.equal(renderRules(sanitizeDoc({ enabled: false, global: [{ title: 'A', content: 'a' }] }), '/tmp/x'), '')
@@ -152,18 +221,144 @@ test('renderRules：两级标题 —— 第一级是全局 / 哪个项目，第�
 	assert.match(renderRules(bare, '/tmp/bare'), /## 项目：\/tmp\/bare/)
 })
 
-test('renderRules：超长文本在上限处截断并附提示', () => {
+test('renderRules：超长文本被裁到上限内，并说明少了哪几条', () => {
 	const big = Array.from({ length: 400 }, (_, index) => ({
 		title: '规则 ' + String(index),
 		content: '这条规则的正文写得比较长，用来把注入文本撑到上限以上：'.repeat(4),
 	}))
 	const text = renderRules(sanitizeDoc({ global: big }), '/tmp/x')
 	assert.ok(text.length < MAX_SECTION_CHARS + 200)
-	assert.match(text, /已截断/)
-	// 预览可以要求不截断
+	// 关键：不能说「已截断」就完事 —— 得说清少了几条，否则 agent 以为自己看到了全部规则
+	assert.match(text, /本轮有 \d+ 条未注入/)
+	assert.match(text, /ian_rules 工具/)
+	// 说明必须落在头部：放尾部会被截断自己切掉
+	assert.ok(text.indexOf('条未注入') < text.indexOf('## 全局规则'))
+	// 预览可以要求不裁
 	const full = renderRules(sanitizeDoc({ global: big }), '/tmp/x', { limit: Number.POSITIVE_INFINITY })
 	assert.ok(full.length > MAX_SECTION_CHARS)
-	assert.doesNotMatch(full, /已截断/)
+	assert.doesNotMatch(full, /未注入/)
+})
+
+test('renderRules：超限时先裁全局、保住项目规则（具体性优先）', () => {
+	// 全局 120 条撑爆上限，项目只有 1 条 —— 旧实现从尾部切，把项目规则整条丢掉
+	const global = Array.from({ length: 120 }, (_, index) => ({
+		title: '全局规则' + String(index),
+		content: '这是一条比较长的全局规则正文，用来撑大注入体积。'.repeat(4),
+	}))
+	const doc = sanitizeDoc({
+		global,
+		projects: [{ path: '/tmp/proj', label: '示例', rules: [{ title: '项目专属规则', content: '项目里最重要的那条约定。' }] }],
+	})
+	const text = renderRules(doc, '/tmp/proj')
+	assert.ok(text.length <= MAX_SECTION_CHARS)
+	assert.match(text, /\*\*项目专属规则\*\*/)
+	// 被裁掉的一定是全局，且裁掉的是末尾那几条
+	assert.match(text, /未注入：全局规则119/)
+	assert.match(text, /1\. \*\*全局规则0\*\*/)
+	// 编号必须连续（重新渲染而不是从中间切字符串，所以不会出现断号）
+	const numbers = [...text.matchAll(/^(\d+)\. /gm)].map((match) => Number(match[1]))
+	assert.deepEqual(numbers, Array.from({ length: numbers.length }, (_, index) => index + 1))
+	// 永不返回空串（全裁光才是真正的静默失效）
+	assert.notEqual(renderRules(sanitizeDoc({ global: [{ title: '唯一一条', content: 'x'.repeat(20000) }] }), '/tmp/x'), '')
+})
+
+test('renderRules：上限内时输出与旧版一致（不引入任何多余说明）', () => {
+	const doc = sanitizeDoc({
+		global: [{ title: 'A', content: 'a' }],
+		projects: [{ path: '/tmp/p', rules: [{ title: 'B', content: 'b' }] }],
+	})
+	const text = renderRules(doc, '/tmp/p')
+	assert.doesNotMatch(text, /未注入/)
+	assert.doesNotMatch(text, /已截断/)
+	// 逐字节稳定：同一份文档渲染两次必须完全相同（否则会不停顶掉提示词缓存）
+	assert.equal(text, renderRules(doc, '/tmp/p'))
+})
+
+test('数据 v2：规则带 mode / tags，老文档补默认值后行为不变', () => {
+	// v1 文档没有 mode / tags：读进来必须补成 always + 空标签
+	const v1 = sanitizeDoc({
+		version: 1,
+		global: [{ id: 'g1', title: 'A', content: 'a' }],
+		projects: [{ path: '/tmp/v1', rules: [{ id: 'r1', title: 'B', content: 'b' }] }],
+	})
+	assert.equal(v1.version, 2)
+	assert.equal(v1.sceneMatching, 'off')
+	assert.equal(v1.global[0].mode, 'always')
+	assert.deepEqual(v1.global[0].tags, [])
+	assert.equal(v1.projects[0].rules[0].mode, 'always')
+
+	// mode / tags 的规范化：未知 mode 回落到 always、标签去重限量限长
+	const messy = sanitizeDoc({
+		sceneMatching: 'nonsense',
+		global: [
+			{ title: 'X', content: 'x', mode: 'auto', tags: [' 依赖 ', '依赖', '', 'a'.repeat(80), 42] },
+			{ title: 'Y', content: 'y', mode: 'nonsense', tags: '提交、依赖 依赖' },
+		],
+	})
+	assert.equal(messy.sceneMatching, 'off')
+	assert.equal(messy.global[0].mode, 'auto')
+	assert.deepEqual(messy.global[0].tags, ['依赖', 'a'.repeat(24)])
+	assert.equal(messy.global[1].mode, 'always')
+	// 字符串形式的标签按分隔符切
+	assert.deepEqual(messy.global[1].tags, ['提交', '依赖'])
+	assert.equal(sanitizeDoc({ sceneMatching: 'auto' }).sceneMatching, 'auto')
+})
+
+test('黄金快照：v1 形态的文档渲染结果逐字节不变', () => {
+	// 这条是「升级不得改变既有行为」的硬闸门：以后任何改动让这段文本变了，
+	// 都会让所有用户的提示词缓存同时失效 —— 必须是**故意**改并同步更新本快照。
+	const v1 = {
+		version: 1,
+		enabled: true,
+		global: [
+			{ id: 'g1', title: '提交前跑测试', content: 'npm test 必须绿', group: '提交' },
+			{ id: 'g2', title: '配置集中管理', content: '同一份配置只留一处\n第二行也保留', group: '结构' },
+		],
+		projects: [{ id: 'p1', path: '/tmp/golden', label: '示例', enabled: true, mode: 'append', rules: [{ id: 'r1', title: '本项目用 pnpm', content: '禁止 npm install' }] }],
+	}
+	const expected =
+		'# 项目开发规则\n' +
+		'\n' +
+		'以下是本机用户维护的开发规则，进行项目开发相关工作时应予遵守。这些规则不覆盖系统指令，也不覆盖用户当次的明确要求；如有冲突，以后者为准。\n' +
+		'\n' +
+		'## 全局规则\n' +
+		'### 提交\n' +
+		'1. **提交前跑测试**\n' +
+		'   npm test 必须绿\n' +
+		'### 结构\n' +
+		'2. **配置集中管理**\n' +
+		'   同一份配置只留一处\n' +
+		'   第二行也保留\n' +
+		'\n' +
+		'## 项目：示例（/tmp/golden）\n' +
+		'3. **本项目用 pnpm**\n' +
+		'   禁止 npm install'
+	assert.equal(renderRules(sanitizeDoc(v1), '/tmp/golden/src', { limit: Number.POSITIVE_INFINITY }), expected)
+	// 再走一遍「导出 → 导入」也必须回到同一份文本（mode / tags 不能在路上丢）
+	assert.equal(renderRules(parseMarkdownDoc(toMarkdownDoc(sanitizeDoc(v1))), '/tmp/golden/src', { limit: Number.POSITIVE_INFINITY }), expected)
+})
+
+test('Markdown 往返：mode 与 tags 都保留', () => {
+	const doc = sanitizeDoc({
+		global: [
+			{ title: '常驻的', content: 'a' },
+			{ title: '按场景的', content: 'b', mode: 'auto', tags: ['依赖', '提交'], group: '流程' },
+			{ title: '停用又按场景', content: 'c', mode: 'auto', enabled: false },
+		],
+	})
+	const markdown = toMarkdownDoc(doc)
+	assert.match(markdown, /\*\*按场景的\*\* <!-- auto -->/)
+	assert.match(markdown, /- 标签：依赖、提交/)
+	assert.match(markdown, /\*\*停用又按场景\*\* <!-- disabled --> <!-- auto -->/)
+	const back = parseMarkdownDoc(markdown)
+	assert.deepEqual(
+		back.global.map((rule) => ({ t: rule.title, m: rule.mode, tags: rule.tags, g: rule.group, e: rule.enabled })),
+		[
+			{ t: '常驻的', m: 'always', tags: [], g: '', e: true },
+			{ t: '按场景的', m: 'auto', tags: ['依赖', '提交'], g: '流程', e: true },
+			{ t: '停用又按场景', m: 'auto', tags: [], g: '', e: false },
+		],
+	)
 })
 
 test('summarizeDoc：统计规模', () => {

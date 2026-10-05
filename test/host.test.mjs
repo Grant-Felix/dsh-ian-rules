@@ -15,7 +15,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { apply, name, inject } from '../lib/index.js'
-import { MAX_CONTENT, MAX_GROUP, MAX_RULES, MAX_SECTION_CHARS, MAX_TITLE } from '../lib/rules.js'
+import { MAX_CONTENT, MAX_GROUP, MAX_RULES, MAX_SECTION_CHARS, MAX_TAG, MAX_TAGS, MAX_TITLE } from '../lib/rules.js'
 
 /** 最小 ctx 桩：只实现本插件用到的注册面，并记录 disposer。 */
 function makeCtx(extra = {}) {
@@ -55,6 +55,18 @@ function makeCtx(extra = {}) {
 		},
 		get(service) {
 			return extra[service]
+		},
+		handlers: new Map(),
+		// 事件监听桩：按场景注入挂在 agent/pre-step 上，测试要能把它取出来手动跑一遍
+		// （DSH 的 waterfall 用法是 `(payload, next) => next()`，见 runPreStep）。
+		on(event, listener) {
+			if (!ctx.handlers.has(event)) ctx.handlers.set(event, [])
+			ctx.handlers.get(event).push(listener)
+			return () => {
+				const list = ctx.handlers.get(event)
+				const index = list.indexOf(listener)
+				if (index >= 0) list.splice(index, 1)
+			}
 		},
 		disposeAll() {
 			while (disposed.length > 0) disposed.pop()()
@@ -124,6 +136,23 @@ const bodyProvider = (ctx) => {
 
 const cwdAssembly = (cwd) => ({ agent: { session: { header: { cwd } } } })
 
+/**
+ * 跑一遍 agent/pre-step waterfall（按注册顺序），返回最终 decision。
+ * DSH 里这是 waterfall 事件：每个监听器 `(payload, next) => …` 决定要不要改写
+ * 上一位的结果，默认 `next()` 给 `{ kind: 'enter', messages }`。
+ */
+async function runPreStep(ctx, payload, base) {
+	const listeners = ctx.handlers.get('agent/pre-step') ?? []
+	// 与 DSH 一致：默认 decision 的 messages 就是本步 claim 到的消息
+	const settled = base ?? { kind: 'enter', messages: Array.isArray(payload?.messages) ? payload.messages : [] }
+	let next = () => Promise.resolve(settled)
+	for (const listener of [...listeners].reverse()) {
+		const inner = next
+		next = () => listener(payload, inner)
+	}
+	return next()
+}
+
 test('插件身份：name / inject 与约定一致', () => {
 	assert.equal(name, 'ian-rules')
 	assert.deepEqual(inject, ['webServer', 'systemPrompt', 'tools'])
@@ -187,6 +216,215 @@ test('注入：软链工作目录经 realpath 回退仍能命中项目规则', a
 	assert.match(provider(cwdAssembly(linkDir)), /软链项目规则/)
 })
 
+test('注入：组装上下文形状不对时退化成只注入全局（不抛错、不猜目录）', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+	const provider = bodyProvider(ctx)
+	const tool = ctx.registeredTools.find((entry) => entry.name === 'ian_rules')
+
+	await tool.execute({ action: 'add', scope: 'global', title: '全局兜底', content: 'x' })
+	await tool.execute({ action: 'add', scope: 'project', path: '/tmp/def-proj', title: '项目专属', content: 'y' })
+
+	// `agent` 是宿主未在公开类型里声明的字段：任何畸形形状都必须收敛成「只注入全局」
+	const malformed = [null, 42, 'x', [], {}, { agent: null }, { agent: {} }, { agent: { session: null } }, { agent: { session: { header: {} } } }, { cwd: 123 }]
+	for (const context of malformed) {
+		assert.doesNotThrow(() => provider(context), '畸形上下文不该抛错：' + JSON.stringify(context))
+		assert.match(provider(context), /全局兜底/)
+		assert.doesNotMatch(provider(context), /项目专属/)
+	}
+	// 字段变成会抛错的 getter，也不能把整个模型步打挂
+	const throwing = {
+		get agent() {
+			throw new Error('宿主内部结构变了')
+		},
+	}
+	assert.doesNotThrow(() => provider(throwing))
+	assert.match(provider(throwing), /全局兜底/)
+})
+
+test('注入：同一份文档连续取值逐字节相同，规则一改立即失效', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+	const provider = bodyProvider(ctx)
+	const tool = ctx.registeredTools.find((entry) => entry.name === 'ian_rules')
+
+	await tool.execute({ action: 'add', scope: 'project', path: '/tmp/cache-proj', title: '第一条', content: 'a' })
+	const first = provider(cwdAssembly('/tmp/cache-proj/src'))
+	// 前缀缓存的前提：同一份规则、同一个目录，连续几步必须拿到完全一样的字符串
+	assert.equal(provider(cwdAssembly('/tmp/cache-proj/src')), first)
+	assert.equal(provider(cwdAssembly('/tmp/cache-proj/src')), first)
+	// 但规则一改必须立刻反映出来（缓存不能把新规则挡住）
+	await tool.execute({ action: 'add', scope: 'project', path: '/tmp/cache-proj', title: '第二条', content: 'b' })
+	const second = provider(cwdAssembly('/tmp/cache-proj/src'))
+	assert.notEqual(second, first)
+	assert.match(second, /第二条/)
+	// 缓存按目录分开：另一个目录不该拿到这个项目的结果
+	assert.doesNotMatch(provider(cwdAssembly('/tmp/other')), /第二条/)
+})
+
+test('接口：preview 会回报命中链（monorepo 下父子都在链里）', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				global: [],
+				projects: [
+					{ path: '/tmp/chain', rules: [{ title: '根级', content: 'r' }] },
+					{ path: '/tmp/chain/pkg', rules: [{ title: '子级', content: 'l' }] },
+				],
+			},
+		}),
+	)
+	const preview = await callRoute(ctx, 'POST', '/ian-rules/preview', JSON.stringify({ path: '/tmp/chain/pkg/src' }))
+	assert.deepEqual(preview.payload.chain.map((entry) => entry.path), ['/tmp/chain', '/tmp/chain/pkg'])
+	assert.deepEqual(preview.payload.inherited, ['/tmp/chain'])
+	assert.equal(preview.payload.counts.project, 2)
+	assert.match(preview.payload.text, /根级/)
+	assert.match(preview.payload.text, /子级/)
+})
+
+test('接口：preview 回报「按场景」规则目录（面板据此预览常驻的只是目录）', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [
+					{ title: '常驻的', content: 'a' },
+					{ title: '按场景的', content: 'b', mode: 'auto', tags: ['依赖'] },
+					{ title: '按场景但停用', content: 'c', mode: 'auto', enabled: false },
+				],
+				projects: [],
+			},
+		}),
+	)
+	const preview = await callRoute(ctx, 'POST', '/ian-rules/preview', JSON.stringify({ path: '/tmp/nowhere' }))
+	assert.equal(preview.payload.sceneMatching, true)
+	// 停用的不进目录；目录里带 tags，供面板显示
+	assert.deepEqual(
+		preview.payload.sceneIndex.map((entry) => ({ t: entry.title, tags: entry.tags })),
+		[{ t: '按场景的', tags: ['依赖'] }],
+	)
+	// P1 阶段：按场景只表达意图，注入行为不变（P2 落地匹配后这条断言会翻过来，届时同步改）
+	assert.match(preview.payload.text, /按场景的/)
+})
+
+test('保存：applyMode=next-session 把运行中的会话钉在旧规则上，新会话用新规则', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+	const provider = bodyProvider(ctx)
+
+	const sessionOf = (id, cwd) => ({ agent: { session: { id, header: { cwd } } } })
+	const running = sessionOf('session-running', '/tmp/defer-proj')
+	const fresh = sessionOf('session-fresh', '/tmp/defer-proj')
+
+	// 先有一版规则，并让「运行中的会话」吃过它（吃进上下文 = 有旧前缀要保护）
+	const first = await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: true, global: [{ title: '第一版规则', content: 'v1' }], projects: [] } }),
+	)
+	assert.equal(first.payload.applyMode, 'now')
+	assert.match(provider(running), /第一版规则/)
+
+	// 第二版用「下个会话生效」
+	const deferred = await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: true, global: [{ title: '第二版规则', content: 'v2' }], projects: [] }, applyMode: 'next-session' }),
+	)
+	assert.equal(deferred.payload.applyMode, 'next-session')
+	assert.equal(deferred.payload.frozenSessions, 1)
+	assert.equal(deferred.payload.meta.deferred.sessions, 1)
+	assert.match(deferred.payload.notice, /继续使用旧规则/)
+	// 关键：已经在跑的会话拿到的是旧文本，逐字节没变
+	assert.match(provider(running), /第一版规则/)
+	assert.doesNotMatch(provider(running), /第二版规则/)
+	// 新会话（没渲染过的）直接吃新规则
+	assert.match(provider(fresh), /第二版规则/)
+
+	// 再保存一次「立即生效」→ 解冻，所有会话都切到新规则
+	const immediate = await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: true, global: [{ title: '第三版规则', content: 'v3' }], projects: [] } }),
+	)
+	assert.equal(immediate.payload.frozenSessions, 0)
+	assert.equal(immediate.payload.meta.deferred.sessions, 0)
+	assert.match(provider(running), /第三版规则/)
+})
+
+test('保存：空文本的会话不会被钉住（否则新规则永远用不上）', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+	const provider = bodyProvider(ctx)
+	const session = { agent: { session: { id: 'session-empty', header: { cwd: '/tmp/defer-empty' } } } }
+
+	// 会话先渲染过一次，但当时一条规则都没有
+	assert.equal(provider(session), '')
+	const saved = await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: true, global: [{ title: '刚加的规则', content: 'x' }], projects: [] }, applyMode: 'next-session' }),
+	)
+	assert.equal(saved.payload.frozenSessions, 0)
+	assert.match(provider(session), /刚加的规则/)
+})
+
+test('保存：不带 doc 的请求保存内存里的当前文档（不能把规则清空）', async (t) => {
+	const home = withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	const saved = await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: true, global: [{ title: '不许被清空', content: 'x' }], projects: [] } }),
+	)
+	assert.equal(saved.status, 200)
+	// 面板「让它们改用新规则」发的就是这种体：只有 revision / applyMode，没有 doc
+	const unfreeze = await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ revision: saved.payload.meta.revision, applyMode: 'now' }),
+	)
+	assert.equal(unfreeze.status, 200)
+	assert.equal(unfreeze.payload.meta.summary.global, 1, '规则条数不该被清成 0')
+	const onDisk = JSON.parse(readFileSync(path.join(home, 'ian-rules.json'), 'utf8'))
+	assert.equal(onDisk.global[0].title, '不许被清空')
+})
+
 test('接口：state / workspaces / save / preview / reload 与落盘 + 备份', async (t) => {
 	const home = withHome(t)
 	const ctx = makeCtx({
@@ -206,6 +444,8 @@ test('接口：state / workspaces / save / preview / reload 与落盘 + 备份',
 		group: MAX_GROUP,
 		content: MAX_CONTENT,
 		rules: MAX_RULES,
+		tags: MAX_TAGS,
+		tag: MAX_TAG,
 	})
 	assert.equal(initial.payload.meta.maxSectionChars, MAX_SECTION_CHARS)
 
@@ -369,6 +609,50 @@ test('ian_rules 工具：list / update / remove 与错误分支', async (t) => {
 	assert.equal((await tool.execute({ action: 'unknown' })).ok, false)
 })
 
+test('ian_rules 工具：list 默认给有界摘要，全文与全项目枚举都要显式要', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+	const tool = ctx.registeredTools.find((entry) => entry.name === 'ian_rules')
+
+	// 造一份「大」文档：80 条全局 + 3 个项目各 40 条 —— 旧实现的 list 会把这些
+	// 连同整段注入原文一次性写进工具结果，而工具结果是永久留在历史里的。
+	const doc = {
+		version: 1,
+		enabled: true,
+		global: Array.from({ length: 80 }, (_, index) => ({ title: '全局R' + String(index), content: '正文'.repeat(80) })),
+		projects: ['a', 'b', 'c'].map((name) => ({
+			path: '/tmp/list-' + name,
+			rules: Array.from({ length: 40 }, (_, index) => ({ title: name + '专属R' + String(index), content: '正文'.repeat(80) })),
+		})),
+	}
+	await callRoute(ctx, 'POST', '/ian-rules/save', JSON.stringify({ doc }))
+
+	const summary = await tool.execute({ action: 'list', path: '/tmp/list-a/sub' })
+	assert.equal(summary.ok, true)
+	assert.ok(summary.data.length < 6000, '默认 list 必须有界，实际 ' + String(summary.data.length) + ' 字符')
+	assert.match(summary.data, /命中 1 个项目规则集/)
+	assert.match(summary.data, /本路径生效 120 条/)
+	// 超出上限的部分只报条数，不逐条倒出来
+	assert.match(summary.data, /…等 90 条/)
+	assert.doesNotMatch(summary.data, /a专属R39/)
+	// 其它项目只报计数，并明确告诉怎么要全
+	assert.match(summary.data, /另有 2 个项目规则集/)
+	assert.match(summary.data, /all: true/)
+	assert.match(summary.data, /full: true/)
+
+	// 要全文才给全文（且这份文档超限，全文比注入文本长）
+	const withFull = await tool.execute({ action: 'list', path: '/tmp/list-a/sub', full: true })
+	assert.match(withFull.data, /完整注入原文/)
+	assert.ok(withFull.data.length > summary.data.length + 8000, 'full:true 应显著更长')
+
+	// 要全项目才列全项目
+	const withAll = await tool.execute({ action: 'list', path: '/tmp/list-a/sub', all: true })
+	assert.match(withAll.data, /其它项目规则集 2 个/)
+	assert.match(withAll.data, /\/tmp\/list-c/)
+})
+
 test('规则文件被外部改动：监听/轮询之外还有 reload 接口兜底', async (t) => {
 	const home = withHome(t)
 	const ctx = makeCtx()
@@ -515,4 +799,281 @@ test('更名迁移：两代旧文件同时存在时，取更新的那一代', as
 	const state = await callRoute(ctx, 'GET', '/ian-rules/state')
 	assert.equal(state.payload.meta.migratedFrom, path.join(home, 'agent-rules.json'), '应按由新到旧的顺序取第一个存在的')
 	assert.equal(state.payload.doc.global[0].title, '上一代')
+})
+
+test('按场景注入：命中的规则走消息尾部，常驻规则留在系统提示，目录常驻', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [
+					{ title: '常驻规则', content: '永远都在' },
+					{ title: '依赖升级单独提交', content: '升级依赖不要和功能改动混在同一个提交里', mode: 'auto', tags: ['依赖'] },
+					{ title: '发布前核对版本号', content: '打 tag 之前核对版本号与变更日志', mode: 'auto', tags: ['发布'] },
+				],
+				projects: [],
+			},
+		}),
+	)
+
+	const agent = { session: { id: 'session-scene', header: { cwd: '/tmp/scene' } } }
+	const prompt = bodyProvider(ctx)({ agent })
+	// 系统提示里：常驻规则照旧，按场景的只留目录（正文不进系统提示 —— 那会毁掉前缀缓存）
+	assert.match(prompt, /常驻规则/)
+	assert.match(prompt, /## 按场景规则（目录）/)
+	assert.match(prompt, /- 依赖升级单独提交（标签：依赖）/)
+	assert.doesNotMatch(prompt, /升级依赖不要和功能改动混在同一个提交里/)
+
+	const userMessage = { id: 'm1', role: 'user', content: [{ type: 'text', text: '我想把依赖升级到最新版' }], source: { kind: 'user' } }
+	const decision = await runPreStep(ctx, { agent, messages: [userMessage], turn: 1, step: 1 })
+	assert.equal(decision.messages.length, 2, '应在本轮消息尾部追加一条')
+	const injected = decision.messages[1]
+	assert.equal(injected.role, 'user')
+	assert.equal(injected.source.kind, 'ian-rules-scene')
+	assert.match(injected.content[0].text, /<system-reminder>/)
+	assert.match(injected.content[0].text, /依赖升级单独提交/)
+	assert.match(injected.content[0].text, /升级依赖不要和功能改动混在同一个提交里/)
+	// 没命中的那条既不在正文里，也不该被说成「命中」
+	assert.doesNotMatch(injected.content[0].text, /发布前核对版本号/)
+	assert.match(injected.content[0].text, /另有 1 条按场景规则本次未命中/)
+})
+
+test('按场景注入：同一轮不重复注入，跨轮重新匹配', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [
+					{ title: '依赖升级单独提交', content: '升级依赖单独一个提交', mode: 'auto', tags: ['依赖'] },
+					{ title: '发布前核对版本号', content: '打 tag 前核对版本号', mode: 'auto', tags: ['发布'] },
+				],
+				projects: [],
+			},
+		}),
+	)
+	const agent = { session: { id: 'session-scene-2', header: { cwd: '/tmp/scene' } } }
+	const message = (id, text) => ({ id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
+
+	const first = await runPreStep(ctx, { agent, messages: [message('m1', '把依赖升级一下')], turn: 1, step: 1 })
+	assert.equal(first.messages.length, 2, '原始消息 + 注入的一条')
+	assert.match(first.messages[1].content[0].text, /依赖升级单独提交/)
+	// 同一轮的第 2 步：没有新消息，规则不能飘，也不能重复注入（每条注入都会留在历史里）
+	const second = await runPreStep(ctx, { agent, messages: [], turn: 1, step: 2 })
+	assert.equal(second.messages.length, 0)
+	// 下一轮换成发布相关：重新匹配，换一条
+	const nextTurn = await runPreStep(ctx, { agent, messages: [message('m2', '准备发布新版本了')], turn: 2, step: 1 })
+	assert.equal(nextTurn.messages.length, 2)
+	assert.match(nextTurn.messages[1].content[0].text, /发布前核对版本号/)
+	assert.doesNotMatch(nextTurn.messages[1].content[0].text, /\*\*依赖升级单独提交\*\*/)
+})
+
+test('按场景注入：开关关着、或没有相关规则时，一条都不注入', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	const agent = { session: { id: 'session-scene-3', header: { cwd: '/tmp/scene' } } }
+	const message = (text) => ({ id: 'm', role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
+
+	// 总开关关着：任何消息都不注入
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: true, sceneMatching: 'off', global: [{ title: '依赖升级单独提交', content: 'x', mode: 'auto', tags: ['依赖'] }], projects: [] } }),
+	)
+	assert.equal((await runPreStep(ctx, { agent, messages: [message('升级依赖')], turn: 1, step: 1 })).messages.length, 1)
+
+	// 开着但这条消息和任何规则都不相关：不注入（宁可不注入，也不要塞无关规则）
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: true, sceneMatching: 'auto', global: [{ title: '依赖升级单独提交', content: '升级依赖单独一个提交', mode: 'auto', tags: ['依赖'] }], projects: [] } }),
+	)
+	assert.equal((await runPreStep(ctx, { agent, messages: [message('今天天气不错')], turn: 2, step: 1 })).messages.length, 1)
+
+	// 规则总开关一关，按场景也一起停
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: false, sceneMatching: 'auto', global: [{ title: '依赖升级单独提交', content: '升级依赖单独一个提交', mode: 'auto', tags: ['依赖'] }], projects: [] } }),
+	)
+	assert.equal((await runPreStep(ctx, { agent, messages: [message('升级依赖')], turn: 3, step: 1 })).messages.length, 1)
+})
+
+test('缓存稳定：按场景注入不改变系统提示那条路径的渲染结果', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [
+					{ title: '常驻规则', content: '永远都在' },
+					{ title: '依赖升级单独提交', content: '升级依赖单独一个提交', mode: 'auto', tags: ['依赖'] },
+				],
+				projects: [],
+			},
+		}),
+	)
+	const agent = { session: { id: 'session-scene-4', header: { cwd: '/tmp/scene' } } }
+	const provider = bodyProvider(ctx)
+	// 连续取值必须逐字节相同：按场景注入走消息尾部，一行都不该动系统提示
+	const first = provider({ agent })
+	assert.equal(provider({ agent }), first)
+	assert.equal(provider({ agent }), first)
+	assert.ok(first.includes('常驻规则'))
+
+	// 真的跑一次注入，再回头看系统提示：必须逐字节没变。
+	// 这条是本插件最重要的一条纪律 —— 系统提示一变，它之后的全部内容都要按
+	// 未命中价重算（在本机路由上是 50 倍的差价）。
+	const message = { id: 'm', role: 'user', content: [{ type: 'text', text: '升级依赖' }], source: { kind: 'user' } }
+	const decision = await runPreStep(ctx, { agent, messages: [message], turn: 1, step: 1 })
+	assert.equal(decision.messages.length, 2, '确实注入了')
+	assert.equal(provider({ agent }), first, '按场景注入不许改变系统提示那条路径的任何一个字节')
+})
+
+test('接口：/scene 场景模拟 —— 报出命中、差一点命中与阈值', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [
+					{ id: 'a1', title: '依赖升级单独提交', content: '升级依赖不要和功能改动混在一个提交里', mode: 'auto', tags: ['依赖'] },
+					{ id: 'a2', title: '发布前核对版本号', content: '打 tag 之前核对版本号与变更日志', mode: 'auto', tags: ['发布'] },
+					{ id: 'a3', title: '常驻规则', content: '永远都在' },
+				],
+				projects: [],
+			},
+		}),
+	)
+
+	const hit = await callRoute(ctx, 'POST', '/ian-rules/scene', JSON.stringify({ path: '/tmp/scene', text: '把依赖升级到最新版' }))
+	assert.equal(hit.status, 200)
+	assert.equal(hit.payload.sceneMatching, true)
+	assert.equal(hit.payload.total, 2, '只统计按场景规则，常驻的不算')
+	assert.deepEqual(hit.payload.matched.map((entry) => entry.id), ['a1'])
+	assert.equal(hit.payload.matched[0].score > hit.payload.threshold, true)
+	// 「差一点命中」要能解释为什么没进来 —— 这是面板敢让用户开这个功能的前提
+	assert.deepEqual(hit.payload.near.map((entry) => entry.id), ['a2'])
+	assert.equal(hit.payload.near[0].score < hit.payload.threshold, true)
+
+	// 完全无关的一句话：一条都不命中
+	const none = await callRoute(ctx, 'POST', '/ian-rules/scene', JSON.stringify({ path: '/tmp/scene', text: '今天天气不错' }))
+	assert.deepEqual(none.payload.matched, [])
+})
+
+test('ian_rules 工具：lookup 按关键词取正文，limit 生效', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+	const tool = ctx.registeredTools.find((entry) => entry.name === 'ian_rules')
+
+	assert.equal((await tool.execute({ action: 'lookup' })).ok, false, '缺 query 要拦下')
+
+	await tool.execute({ action: 'add', title: '依赖升级单独提交', content: '升级依赖单独一个提交' })
+	await tool.execute({ action: 'add', title: '发布前核对版本号', content: '打 tag 前核对版本号' })
+	await tool.execute({ action: 'add', title: '提交前跑测试', content: 'npm test 必须绿' })
+
+	const found = await tool.execute({ action: 'lookup', query: '我要升级依赖', path: '/tmp/none' })
+	assert.equal(found.ok, true)
+	assert.match(found.data, /依赖升级单独提交/)
+	assert.match(found.data, /升级依赖单独一个提交/, '必须给正文，否则 lookup 没有意义')
+	assert.doesNotMatch(found.data, /发布前核对版本号/)
+	assert.match(found.data, /相关度/)
+
+	// 无关查询：说清「没找到」而不是硬塞一条
+	const miss = await tool.execute({ action: 'lookup', query: '今天天气不错', path: '/tmp/none' })
+	assert.match(miss.data, /没有找到相关的规则/)
+
+	// limit 生效
+	const many = await tool.execute({ action: 'lookup', query: '升级依赖', path: '/tmp/none', limit: 1 })
+	assert.equal(many.data.includes('发布前核对版本号'), false)
+})
+
+test('按场景注入：开着 sceneLog 时会往命中日志里记一行', async (t) => {
+	const home = withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				sceneLog: true,
+				global: [{ id: 'a1', title: '依赖升级单独提交', content: '升级依赖单独一个提交', mode: 'auto', tags: ['依赖'] }],
+				projects: [],
+			},
+		}),
+	)
+	const agent = { session: { id: 'session-log', header: { cwd: '/tmp/scene' } } }
+	const message = { id: 'm', role: 'user', content: [{ type: 'text', text: '升级依赖' }], source: { kind: 'user' } }
+	assert.equal((await runPreStep(ctx, { agent, messages: [message], turn: 1, step: 1 })).messages.length, 2)
+
+	// 日志是异步追加的（尽力而为，不阻塞模型步）：给它一拍
+	await new Promise((resolve) => setTimeout(resolve, 50))
+	const logFile = path.join(home, 'ian-rules.hits.jsonl')
+	assert.equal(existsSync(logFile), true, '开了 sceneLog 就该有日志文件')
+	const line = JSON.parse(readFileSync(logFile, 'utf8').trim().split('\n').pop())
+	assert.equal(line.session, 'session-log')
+	assert.equal(line.turn, 1)
+	assert.deepEqual(line.matched, ['a1'])
+
+	// 默认关着时不写文件
+	const quietHome = withHome(t)
+	const quiet = makeCtx()
+	apply(quiet)
+	t.after(() => quiet.disposeAll())
+	await callRoute(
+		quiet,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({ doc: { enabled: true, sceneMatching: 'auto', global: [{ id: 'a1', title: '依赖升级单独提交', content: '升级依赖单独一个提交', mode: 'auto', tags: ['依赖'] }], projects: [] } }),
+	)
+	await runPreStep(quiet, { agent, messages: [message], turn: 1, step: 1 })
+	await new Promise((resolve) => setTimeout(resolve, 50))
+	assert.equal(existsSync(path.join(quietHome, 'ian-rules.hits.jsonl')), false, '没开就不该写日志')
 })

@@ -23,6 +23,7 @@ jobs:
         run: |
           node --check lib/index.js
           node --check lib/rules.js
+          node --check lib/scene.js
           node --check lib/client.js
       - name: 单元 / 集成测试
         run: node --test
