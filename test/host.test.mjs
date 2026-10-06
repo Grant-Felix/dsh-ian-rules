@@ -991,9 +991,12 @@ test('接口：/scene 场景模拟 —— 报出命中、差一点命中与阈�
 	assert.equal(hit.payload.total, 2, '只统计按场景规则，常驻的不算')
 	assert.deepEqual(hit.payload.matched.map((entry) => entry.id), ['a1'])
 	assert.equal(hit.payload.matched[0].score > hit.payload.threshold, true)
-	// 「差一点命中」要能解释为什么没进来 —— 这是面板敢让用户开这个功能的前提
-	assert.deepEqual(hit.payload.near.map((entry) => entry.id), ['a2'])
-	assert.equal(hit.payload.near[0].score < hit.payload.threshold, true)
+	// 「差一点命中」只列**真的有词命中**、只是分不够的；「发布前核对版本号」与这句话
+	// 一个词都不沾（旧实现靠一个「版」字就把它列进来），所以这里必须是空的。
+	assert.deepEqual(hit.payload.near, [])
+	// 反向：给一句与它真有词重叠的话，它就该出现在 near 里
+	const near = await callRoute(ctx, 'POST', '/ian-rules/scene', JSON.stringify({ path: '/tmp/scene', text: '发布前要核对版本号' }))
+	assert.deepEqual(near.payload.matched.map((entry) => entry.id), ['a2'])
 
 	// 完全无关的一句话：一条都不命中
 	const none = await callRoute(ctx, 'POST', '/ian-rules/scene', JSON.stringify({ path: '/tmp/scene', text: '今天天气不错' }))

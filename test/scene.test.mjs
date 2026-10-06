@@ -106,3 +106,31 @@ test('sceneDigest：集合不变则指纹不变，规则被编辑过就要重新
 	assert.notEqual(sceneDigest([a]), sceneDigest([{ ...a, content: '正文改过了' }]))
 	assert.notEqual(sceneDigest([a]), sceneDigest([a, b]), '多一条也算变了')
 })
+
+test('tokenize：标点不算词（全角逗号 / 括号曾经也能参与打分）', () => {
+	const terms = tokenize('升级依赖，然后（提交）。')
+	assert.ok(terms.words.has('升级'), '汉字二元组照常')
+	assert.equal(terms.chars.has('，'), false, '全角逗号不是词')
+	assert.equal(terms.chars.has('（'), false)
+	assert.equal(terms.chars.has('）'), false)
+	assert.equal(terms.chars.has('。'), false)
+})
+
+test('scoreRule：一个词都没命中就不算相关（单字撞车不许成局）', () => {
+	// 实测过的误命中：这句话对这条规则**零词命中**，只靠 段/现/复/不 四个常用字
+	// 在标签 + 标题 + 正文三处各加一点，凑到 2.81 分（阈值 1.5）就命中了。
+	const unrelated = rule(
+		'x',
+		'项目/阶段/现实（所有任务/复用/规划）',
+		'起手先写下当前阶段与「本阶段不能动的东西」；原型/快开期可以更粗但仍要留验收，重构/维护/遗留期按保守走（最小改、不动公共契约、不追抽象完美）；阶段不明时按后者。禁：机械复制、脱离阶段追抽象最佳、忽视运营现实。',
+		['规划', '方案', '复用', '阶段'],
+	)
+	assert.equal(scoreRule(unrelated, tokenize('这段代码复现不了')), 0)
+
+	// 反向：真的有词命中时，单字仍然照常加分（别把降权做成一刀切）
+	const relevant = rule('y', '假设驱动', '最小可测假设→最便宜实验', ['复现'])
+	assert.ok(scoreRule(relevant, tokenize('这段代码复现不了')) > SCENE_THRESHOLD)
+
+	// 真相关的仍然命中（修完不能把该命中的也误伤）
+	assert.ok(scoreRule(rule('z', '条件结论', '结论必带环境与规模', ['耗时', '延迟']), tokenize('这个接口响应很慢，延迟高')) > SCENE_THRESHOLD)
+})
