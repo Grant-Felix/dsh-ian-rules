@@ -1148,3 +1148,122 @@ test('接口：/scene 的 path 只决定候选范围，不进匹配信号；分�
 	assert.deepEqual(related.payload.matched.map((entry) => entry.id), ['a2'])
 	assert.ok(related.payload.matched[0].score >= related.payload.threshold)
 })
+
+test('按场景注入：消息没命中时退回用本会话动过的文件名（且只作兜底）', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [
+					{ id: 'a1', title: '假设驱动', content: '最小可测假设→最便宜实验', mode: 'auto', tags: ['bug', '复现'] },
+					{ id: 'a2', title: '条件结论', content: '结论必带环境与规模', mode: 'auto', tags: ['latency', '性能'] },
+				],
+				projects: [],
+			},
+		}),
+	)
+
+	/** 会话桩：带 deriveMessages()，模拟「本会话动过哪些文件」。 */
+	const agentWith = (id, cwd, files) => ({
+		agent: {
+			session: {
+				id,
+				header: { cwd },
+				deriveMessages: () =>
+					files.map((file, index) => ({
+						id: 'h' + String(index),
+						role: 'assistant',
+						content: [{ type: 'tool-call', id: 'c' + String(index), name: 'read', arguments: JSON.stringify({ path: file }) }],
+					})),
+			},
+		},
+	})
+	const msg = (text) => ({ id: 'm', role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
+	const run = (id, cwd, files, text, turn = 1) =>
+		runPreStep(ctx, { ...agentWith(id, cwd, files), messages: [msg(text)], turn, step: 1 })
+
+	// 消息本身没命中，但会话在读 bug-repro.ts → 兜底命中「假设驱动」
+	const byFile = await run('s-file-hit', '/tmp/x', ['/repo/perf/bug-repro.ts'], '帮我看看这个')
+	assert.equal(byFile.messages.length, 2, '应靠文件名兜底命中')
+	assert.match(byFile.messages[1].content[0].text, /假设驱动/)
+
+	// 通用文件名不参与：否则等于按文件名随机触发规则
+	const stopwords = await run('s-stopword', '/tmp/x', ['/repo/src/index.ts', '/repo/src/utils.ts', '/repo/package.json'], '帮我看看这个')
+	assert.equal(stopwords.messages.length, 1, 'index/utils/package 这类名字不该喊出任何规则')
+
+	// 中文路径不参与（踩过的坑：~/项目/ 里的「项目」被喂给匹配器）
+	const cjkPath = await run('s-cjk', '/tmp/x', ['/home/u/项目/性能.ts'], '帮我看看这个')
+	assert.equal(cjkPath.messages.length, 1, '中文路径不该参与匹配')
+
+	// 只作兜底：消息已经命中时，文件名不许改变结果（这条守的是「路径不与消息争主导」）
+	const messageWins = await run('s-priority', '/tmp/x', ['/repo/perf/latency-bench.ts'], '这段代码复现不了')
+	assert.equal(messageWins.messages.length, 2)
+	assert.match(messageWins.messages[1].content[0].text, /假设驱动/, '应该是消息命中的那条')
+	assert.doesNotMatch(messageWins.messages[1].content[0].text, /条件结论/, '文件名对应的那条不该挤进来')
+
+	// deriveMessages 抛错也不能把模型步带崩
+	const broken = {
+		agent: {
+			session: {
+				id: 's-broken',
+				header: { cwd: '/tmp/x' },
+				deriveMessages() {
+					throw new Error('会话历史读不了')
+				},
+			},
+		},
+	}
+	const survived = await runPreStep(ctx, { ...broken, messages: [msg('帮我看看这个')], turn: 1, step: 1 })
+	assert.equal(survived.messages.length, 1)
+})
+
+test('按场景注入：命中集合没变就不重复注入（否则每轮都在历史里堆一份同样的规则）', async (t) => {
+	withHome(t)
+	const ctx = makeCtx()
+	apply(ctx)
+	t.after(() => ctx.disposeAll())
+
+	await callRoute(
+		ctx,
+		'POST',
+		'/ian-rules/save',
+		JSON.stringify({
+			doc: {
+				enabled: true,
+				sceneMatching: 'auto',
+				global: [
+					{ id: 'a1', title: '假设驱动', content: '最小可测假设→最便宜实验', mode: 'auto', tags: ['复现'] },
+					{ id: 'a2', title: '条件结论', content: '结论必带环境与规模', mode: 'auto', tags: ['性能'] },
+				],
+				projects: [],
+			},
+		}),
+	)
+	const agent = { session: { id: 'session-repeat', header: { cwd: '/tmp/x' } } }
+	const msg = (id, text) => ({ id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
+
+	// 第 1 轮命中 → 注入
+	const first = await runPreStep(ctx, { agent, messages: [msg('m1', '这段代码复现不了')], turn: 1, step: 1 })
+	assert.equal(first.messages.length, 2)
+	// 第 2 轮同样命中同一条：正文已经在上一条消息里了，不该再堆一份
+	const second = await runPreStep(ctx, { agent, messages: [msg('m2', '还是复现不了')], turn: 2, step: 1 })
+	assert.equal(second.messages.length, 1, '同样的命中集合不该重复注入（设计里写的是「集合没变就不重复注入」）')
+	// 但命中集合变了就要注入新的
+	const third = await runPreStep(ctx, { agent, messages: [msg('m3', '这段代码复现不了，另外帮我看看性能')], turn: 3, step: 1 })
+	assert.equal(third.messages.length, 2, '集合变大 = 变了，要注入')
+	assert.match(third.messages[1].content[0].text, /假设驱动/)
+	assert.match(third.messages[1].content[0].text, /条件结论/)
+	// 再回到原来的集合（只剩假设驱动）：digest 与上次不同 → 也要注入，把范围收回来
+	const back = await runPreStep(ctx, { agent, messages: [msg('m4', '还是复现不了')], turn: 4, step: 1 })
+	assert.equal(back.messages.length, 2)
+	assert.doesNotMatch(back.messages[1].content[0].text, /条件结论/)
+})
