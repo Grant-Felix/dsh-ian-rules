@@ -1152,7 +1152,7 @@ test('接口：/scene 的 path 只决定候选范围，不进匹配信号；分�
 	assert.ok(related.payload.matched[0].score >= related.payload.threshold)
 })
 
-test('按场景注入：消息没命中时退回用本会话动过的文件名（且只作兜底）', async (t) => {
+test('按场景注入：消息没命中时，用「本轮动过的文件」兜底（且只认本轮）', async (t) => {
 	withHome(t)
 	const ctx = makeCtx()
 	apply(ctx)
@@ -1169,49 +1169,65 @@ test('按场景注入：消息没命中时退回用本会话动过的文件名�
 				global: [
 					{ id: 'a1', title: '假设驱动', content: '最小可测假设→最便宜实验', mode: 'auto', tags: ['bug', '复现'] },
 					{ id: 'a2', title: '条件结论', content: '结论必带环境与规模', mode: 'auto', tags: ['latency', '性能'] },
+					// 这条专门用来验「中文文件名必须被拦掉」：`设计评审-场景化规则注入.md`
+					// 不带 ASCII 过滤时会拆出「设计评审」，正好命中这条 —— 断言才有杀伤力。
+					{ id: 'a3', title: '方案评审', content: '设计评审要留记录', mode: 'auto', tags: ['评审'] },
 				],
 				projects: [],
 			},
 		}),
 	)
 
-	/** 会话桩：带 deriveMessages()，模拟「本会话动过哪些文件」。 */
-	const agentWith = (id, cwd, files) => ({
-		agent: {
-			session: {
-				id,
-				header: { cwd },
-				deriveMessages: () =>
-					files.map((file, index) => ({
-						id: 'h' + String(index),
-						role: 'assistant',
-						content: [{ type: 'tool-call', id: 'c' + String(index), name: 'read', arguments: JSON.stringify({ path: file }) }],
-					})),
-			},
-		},
-	})
-	const msg = (text) => ({ id: 'm', role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
-	const run = (id, cwd, files, text, turn = 1) =>
-		runPreStep(ctx, { ...agentWith(id, cwd, files), messages: [msg(text)], turn, step: 1 })
+	/** 会真实增长的历史桩：deriveMessages() 返回「到目前为止」的消息。 */
+	const session = (id) => {
+		const history = []
+		return {
+			history,
+			agent: { session: { id, header: { cwd: '/tmp/x' }, deriveMessages: () => history.slice() } },
+		}
+	}
+	const readCall = (file) => ({ id: 'h' + file, role: 'assistant', content: [{ type: 'tool-call', id: 'c', name: 'read', arguments: JSON.stringify({ path: file }) }] })
+	const msg = (text) => ({ id: 'm' + text, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
+	const step = (s, text, turn = 1, no = 1) => runPreStep(ctx, { agent: s.agent, messages: text === '' ? [] : [msg(text)], turn, step: no })
 
-	// 消息本身没命中，但会话在读 bug-repro.ts → 兜底命中「假设驱动」
-	const byFile = await run('s-file-hit', '/tmp/x', ['/repo/perf/bug-repro.ts'], '帮我看看这个')
-	assert.equal(byFile.messages.length, 2, '应靠文件名兜底命中')
-	assert.match(byFile.messages[1].content[0].text, /假设驱动/)
+	// 本轮第一步：还没碰过任何文件 → 兜底没有可用信号
+	const a = session('s-a')
+	assert.equal((await step(a, '帮我看看这个')).messages.length, 1, '本轮还没碰过文件，不注入')
+	// 这一步里读了 bug-repro.ts → 第二步（消息为空，本轮后续步骤就是常态）靠文件名兜底
+	a.history.push(readCall('/repo/perf/bug-repro.ts'))
+	const a2 = await step(a, '', 1, 2)
+	assert.equal(a2.messages.length, 1)
+	assert.match(a2.messages[0].content[0].text, /假设驱动/)
 
 	// 通用文件名不参与：否则等于按文件名随机触发规则
-	const stopwords = await run('s-stopword', '/tmp/x', ['/repo/src/index.ts', '/repo/src/utils.ts', '/repo/package.json'], '帮我看看这个')
-	assert.equal(stopwords.messages.length, 1, 'index/utils/package 这类名字不该喊出任何规则')
+	const b = session('s-b')
+	await step(b, '帮我看看这个')
+	b.history.push(readCall('/repo/src/index.ts'), readCall('/repo/src/utils.ts'), readCall('/repo/package.json'))
+	assert.equal((await step(b, '', 1, 2)).messages.length, 0)
 
-	// 中文路径不参与（踩过的坑：~/项目/ 里的「项目」被喂给匹配器）
-	const cjkPath = await run('s-cjk', '/tmp/x', ['/home/u/项目/性能.ts'], '帮我看看这个')
-	assert.equal(cjkPath.messages.length, 1, '中文路径不该参与匹配')
+	// 中文文件名必须被拦掉 —— 这条用例要是用 2 个汉字的名字，就会因为长度阈值而假通过
+	const c = session('s-c')
+	await step(c, '帮我看看这个')
+	c.history.push(readCall('/home/u/项目/设计评审-场景化规则注入.md'))
+	assert.equal(
+		(await step(c, '', 1, 2)).messages.length,
+		0,
+		'中文文件名不许拆成中文词参与匹配（它本会命中「方案评审」那条）',
+	)
 
-	// 只作兜底：消息已经命中时，文件名不许改变结果（这条守的是「路径不与消息争主导」）
-	const messageWins = await run('s-priority', '/tmp/x', ['/repo/perf/latency-bench.ts'], '这段代码复现不了')
-	assert.equal(messageWins.messages.length, 2)
-	assert.match(messageWins.messages[1].content[0].text, /假设驱动/, '应该是消息命中的那条')
-	assert.doesNotMatch(messageWins.messages[1].content[0].text, /条件结论/, '文件名对应的那条不该挤进来')
+	// 只作兜底：消息已经命中时，文件名不许改变结果
+	const d = session('s-d')
+	await step(d, '这段代码复现不了')
+	d.history.push(readCall('/repo/perf/latency-bench.ts'))
+	const d2 = await step(d, '这段代码复现不了', 1, 2)
+	assert.equal(d2.messages.length, 1)
+	assert.doesNotMatch(d2.messages[0].content[0].text, /条件结论/, '文件名对应的那条不该挤进来')
+
+	// 跨轮不继承：上一轮碰过的文件不算本轮
+	const e = session('s-e')
+	await step(e, '帮我看看这个')
+	e.history.push(readCall('/repo/perf/bug-repro.ts'))
+	assert.equal((await step(e, '帮我看看这个', 2, 1)).messages.length, 1, '上一轮碰过的文件不该算到这一轮')
 
 	// deriveMessages 抛错也不能把模型步带崩
 	const broken = {
@@ -1225,8 +1241,7 @@ test('按场景注入：消息没命中时退回用本会话动过的文件名�
 			},
 		},
 	}
-	const survived = await runPreStep(ctx, { ...broken, messages: [msg('帮我看看这个')], turn: 1, step: 1 })
-	assert.equal(survived.messages.length, 1)
+	assert.equal((await runPreStep(ctx, { ...broken, messages: [msg('帮我看看这个')], turn: 1, step: 1 })).messages.length, 1)
 })
 
 test('按场景注入：命中集合没变就不重复注入（否则每轮都在历史里堆一份同样的规则）', async (t) => {
