@@ -1,6 +1,6 @@
 {
   "name": "dsh-ian-rules",
-  "version": "26.10.6-2",
+  "version": "26.10.6-3",
   "description": "项目开发规则：DSH 开源插件（MIT，供所有人使用、学习和研究）。在 Web GUI 右侧栏提供「开发规则」面板（与「Docker 容器」并列，全局规则 + 按项目覆盖），并把当前项目生效的规则自动注入每个会话的系统提示，让 agent 开发项目时自动遵守；另含 ian_rules 工具，便于在对话里直接维护规则。",
   "keywords": [
     "deepseek",
